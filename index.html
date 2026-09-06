@@ -116,6 +116,12 @@ html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-
 <script src="https://review.ecologyhive.co.uk/models.js" crossorigin="anonymous"></script>
 <script src="https://review.ecologyhive.co.uk/files.js" crossorigin="anonymous"></script>
 <script src="https://review.ecologyhive.co.uk/map.js" crossorigin="anonymous"></script>
+<!-- wav.js/dsp.js for sonogram viewing - NOT dsp-worker.js, since that spins up a Worker via a
+     path resolved against this PAGE's own origin ('dsp-worker.js', relative), which would 404
+     here even though dsp.js itself loads fine cross-origin. portal.js calls the synchronous
+     Dsp.computeSpectrogram directly instead - see SonogramPopup's own comment. -->
+<script src="https://review.ecologyhive.co.uk/wav.js" crossorigin="anonymous"></script>
+<script src="https://review.ecologyhive.co.uk/dsp.js" crossorigin="anonymous"></script>
 <script src="portal.js"></script>
 </body>
 </html>
