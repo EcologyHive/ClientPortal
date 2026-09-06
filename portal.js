@@ -495,22 +495,33 @@ function LinkMediaScreen({ onLinked, onSkip }) {
 // emergence." The per-visit table only appears once there's more than one visit to compare, same
 // as the internal register's own convention (a single-visit entrance would just repeat the summary
 // line above it).
-function emergenceCard(code, description, roostColor, s) {
+// Mirrors the internal register's own entrance/group card exactly - Clara, 2026-09-08: "I want the
+// roost pills to be the same as the ones in the roost register - to include description location
+// peak count (survey date) and then the hourly interval where emergences happen and species."
+// `showWindow` only applies to entrances, not roost groups - the internal app itself only shows the
+// inline "· HH:MM – HH:MM" window on an entrance's own peak line; a group's combined figure relies
+// on its per-visit table instead, same distinction kept here rather than inventing a group-level
+// window the source app doesn't have.
+function emergenceCard(code, description, roostColor, s, opts) {
+  const { locationLine, peakLabel = 'peak count', countLabel = 'Count', showWindow = false } = opts || {};
+  const peakRow = showWindow ? s.bySurvey.find((b) => b.surveyDate === s.peakSurveyDate && b.count === s.peakCount) : null;
   return h('div', { key: code, className: 'card', style: { marginBottom: 12, ...(roostColor ? { borderLeft: `4px solid ${roostColor}` } : {}) } },
     h('div', { className: 'card-title', style: { display: 'flex', alignItems: 'center', gap: 8 } },
       roostColor && h('span', { style: { display: 'inline-block', width: 11, height: 11, borderRadius: '50%', background: roostColor, flexShrink: 0 } }),
       code
     ),
     description && h('div', { className: 'card-sub', style: { marginTop: 2 } }, description),
+    locationLine && h('div', { className: 'card-sub', style: { marginTop: 2 } }, locationLine),
     h('div', { style: { marginTop: 8 } },
-      h('strong', null, s.peakCount), ' peak count',
-      s.peakSurveyDate && h('span', { className: 'card-sub' }, ` (${s.peakSurveyDate})`)
+      h('strong', null, s.peakCount), ` ${peakLabel}`,
+      s.peakSurveyDate && h('span', { className: 'card-sub' }, ` (${s.peakSurveyDate})`),
+      peakRow && peakRow.emergenceStart && h('span', { className: 'card-sub' }, ` · ${formatEmergenceTime(peakRow.emergenceStart)} – ${formatEmergenceTime(peakRow.emergenceEnd)}`)
     ),
     h('div', { style: { marginTop: 4 } }, s.species.size > 0 ? Array.from(s.species).join(', ') : 'No species confirmed'),
     s.bySurvey.length > 1 && h('div', { style: { overflowX: 'auto', marginTop: 10 } },
       h('table', { style: { borderCollapse: 'collapse', fontSize: 12 } },
         h('thead', null, h('tr', null,
-          h('th', { style: SUMMARY_TH_STYLE }, 'Survey'), h('th', { style: SUMMARY_TH_STYLE }, 'Count'), h('th', { style: SUMMARY_TH_STYLE }, 'Emergence window')
+          h('th', { style: SUMMARY_TH_STYLE }, 'Survey'), h('th', { style: SUMMARY_TH_STYLE }, countLabel), h('th', { style: SUMMARY_TH_STYLE }, 'Emergence window')
         )),
         h('tbody', null, s.bySurvey.map((row) => h('tr', { key: row.surveyId },
           h('td', { style: SUMMARY_TD_STYLE }, row.surveyDate),
@@ -537,7 +548,10 @@ function RoostRegisterView({ site }) {
   function entranceCardWithImages(r, roostColor) {
     const s = stats[r.id] || { peakCount: 0, peakSurveyDate: null, species: new Set(), bySurvey: [], references: [] };
     return h('div', { key: r.id },
-      emergenceCard(r.code, r.description, roostColor, s),
+      emergenceCard(r.code, r.description, roostColor, s, {
+        locationLine: r.latitude != null ? `${r.latitude.toFixed(5)}, ${r.longitude.toFixed(5)}` : 'No location set',
+        peakLabel: 'peak count', countLabel: 'Count', showWindow: true,
+      }),
       h('button', {
         className: 'btn btn-secondary btn-small', style: { margin: '-6px 0 12px' },
         onClick: () => setExpandedId(expandedId === r.id ? null : r.id),
@@ -565,8 +579,13 @@ function RoostRegisterView({ site }) {
                 const gs = groupStats[g.id] || { peakCount: 0, peakSurveyDate: null, species: new Set(), bySurvey: [] };
                 const members = entrances.filter((e) => e.roostId === g.id);
                 const roostColor = colorForRoost(g.id);
+                const geometryLine = g.geometryType === 'point'
+                  ? (members.some((e) => e.latitude != null && e.longitude != null) ? 'point - located at its entrance' : 'point - no entrance with coordinates yet')
+                  : g.geometryType ? `${g.geometryType}${g.geometry ? ' shape set' : ' - shape not drawn yet'}` : 'No shape set';
                 return h('div', { key: g.id, style: { marginBottom: 16 } },
-                  emergenceCard(g.code, g.description, roostColor, gs),
+                  emergenceCard(g.code, g.description, roostColor, gs, {
+                    locationLine: geometryLine, peakLabel: 'combined peak count', countLabel: 'Combined count', showWindow: false,
+                  }),
                   h('div', { style: { marginTop: -6, paddingLeft: 14, borderLeft: '2px solid var(--border)' } },
                     members.map((r) => entranceCardWithImages(r, roostColor))
                   )
