@@ -22,6 +22,8 @@ const { useState, useEffect, useRef, useMemo } = React;
 const h = React.createElement;
 const M = window.SR.Models;
 const F = window.SR.Files;
+const Wav = window.SR.Wav;
+const Dsp = window.SR.Dsp;
 
 function Modal({ title, onClose, wide, children }) {
   return h('div', { className: 'modal-overlay', onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); } },
@@ -127,6 +129,49 @@ function computeRoostStats(site) {
   });
   Object.values(stats).forEach((s) => s.bySurvey.sort((a, b) => (a.surveyDate || '').localeCompare(b.surveyDate || '')));
   return stats;
+}
+
+// Aggregates entrance-level stats up to the Roost (group) level - copied verbatim from
+// SurveyReview's own computeRoostGroupStats, a pure function of `site`.
+function computeRoostGroupStats(site) {
+  const entranceStats = computeRoostStats(site);
+  const groupStats = {};
+  const bySurveyAgg = {};
+  (site.roosts || []).forEach((g) => {
+    groupStats[g.id] = { peakCount: 0, peakSurveyDate: null, species: new Set(), references: [], bySurvey: [] };
+    bySurveyAgg[g.id] = {};
+  });
+  (site.roostEntrances || []).forEach((entrance) => {
+    const g = entrance.roostId && groupStats[entrance.roostId];
+    if (!g) return;
+    const es = entranceStats[entrance.id];
+    if (!es) return;
+    es.species.forEach((sp) => g.species.add(sp));
+    g.references.push(...es.references);
+    es.bySurvey.forEach((b) => {
+      const agg = bySurveyAgg[entrance.roostId];
+      if (!agg[b.surveyId]) {
+        agg[b.surveyId] = { surveyId: b.surveyId, surveyDate: b.surveyDate, count: 0, species: new Set(), locations: new Set(), emergenceStart: null, emergenceEnd: null };
+      }
+      const a = agg[b.surveyId];
+      a.count += b.count;
+      b.species.forEach((sp) => a.species.add(sp));
+      b.locations.forEach((l) => a.locations.add(l));
+      if (b.emergenceStart) {
+        if (!a.emergenceStart || b.emergenceStart < a.emergenceStart) a.emergenceStart = b.emergenceStart;
+        if (!a.emergenceEnd || b.emergenceEnd > a.emergenceEnd) a.emergenceEnd = b.emergenceEnd;
+      }
+    });
+  });
+  Object.keys(groupStats).forEach((roostId) => {
+    const g = groupStats[roostId];
+    Object.values(bySurveyAgg[roostId]).forEach((a) => {
+      g.bySurvey.push({ surveyId: a.surveyId, surveyDate: a.surveyDate, count: a.count, species: Array.from(a.species), locations: Array.from(a.locations), emergenceStart: a.emergenceStart, emergenceEnd: a.emergenceEnd });
+      if (a.count > g.peakCount) { g.peakCount = a.count; g.peakSurveyDate = a.surveyDate; }
+    });
+    g.bySurvey.sort((x, y) => (x.surveyDate || '').localeCompare(y.surveyDate || ''));
+  });
+  return groupStats;
 }
 
 function computeSoundStats(surveys) {
@@ -325,36 +370,66 @@ function VideoPopup({ image, videoHandle, onClose }) {
   );
 }
 
-// ---------------- A simple, view-only map of registered roost entrances/groups (not the full
-// SurveyMapPanel with its Locations/Detectors layers - those are internal equipment-placement
-// detail the client doesn't need; just where the confirmed roosts are). ----------------
-function EntranceMap({ site }) {
+// ---------------- Site map: roost entrances/groups, plus optional Locations/Detectors layers,
+// scoped to a chosen survey visit - same "survey visit" + "Locations/Detectors/Roosts" layer
+// toggles as SurveyReview's own SurveyMapPanel, rebuilt here at client-appropriate simplicity
+// (no FOV wedges/bearing icons - just presence markers) since it's not worth pulling the internal
+// component's full editing-adjacent complexity across for a read-only view. Clara, 2026-09-07/08:
+// "they can... toggle on and off cameras and sound detectors" and "check survey date they want to
+// check." ----------------
+function SiteMap({ site, surveyId, layers }) {
   const elRef = useRef(null);
   const mapRef = useRef(null);
+  const layerRef = useRef(null);
   useEffect(() => {
     const map = L.map(elRef.current, { zoomControl: true }).setView([52.2, -2.22], 6);
     SR.Map.makeTileLayer(SR.Map.DEFAULT_BASE_LAYER).addTo(map);
     mapRef.current = map;
-    const bounds = [];
-    (site.roostEntrances || []).forEach((r) => {
-      if (typeof r.latitude !== 'number' || typeof r.longitude !== 'number') return;
-      L.marker([r.latitude, r.longitude], { icon: SR.Map.iconFor('roost') })
-        .bindTooltip(`${r.code}${r.description ? ' — ' + r.description : ''}`)
-        .addTo(map);
-      bounds.push([r.latitude, r.longitude]);
-    });
-    (site.roosts || []).forEach((g) => {
-      if (!g.geometry) return;
-      try {
-        L.geoJSON(g.geometry, { style: { color: colorForRoost(g.id), weight: 3 } }).addTo(map);
-      } catch (e) { console.error('EntranceMap: skipping unrenderable roost shape', e); }
-    });
-    if (bounds.length > 0) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 16 });
     setTimeout(() => map.invalidateSize(), 50);
     return () => { try { map.remove(); } catch (e) {} };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [site]);
-  return h('div', { ref: elRef, className: 'map-picker', style: { height: 360 } });
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (layerRef.current) { try { map.removeLayer(layerRef.current); } catch (e) {} }
+    const group = L.layerGroup();
+    const bounds = [];
+    const surveys = (site.surveys || []).filter((sv) => surveyId === 'all' || sv.id === surveyId);
+
+    if (layers.locations) {
+      surveys.forEach((sv) => (sv.locations || []).forEach((loc) => {
+        if (typeof loc.latitude !== 'number' || typeof loc.longitude !== 'number') return;
+        L.marker([loc.latitude, loc.longitude], { icon: SR.Map.iconFor('location') }).bindTooltip(loc.name || '(unnamed location)').addTo(group);
+        bounds.push([loc.latitude, loc.longitude]);
+      }));
+    }
+    if (layers.detectors) {
+      surveys.forEach((sv) => (sv.soundDetectors || []).forEach((det) => {
+        if (typeof det.latitude !== 'number' || typeof det.longitude !== 'number') return;
+        L.marker([det.latitude, det.longitude], { icon: SR.Map.iconFor('detector') }).bindTooltip(det.name || '(unnamed detector)').addTo(group);
+        bounds.push([det.latitude, det.longitude]);
+      }));
+    }
+    if (layers.roosts) {
+      (site.roostEntrances || []).forEach((r) => {
+        if (typeof r.latitude !== 'number' || typeof r.longitude !== 'number') return;
+        L.marker([r.latitude, r.longitude], { icon: SR.Map.iconFor('roost') }).bindTooltip(`${r.code}${r.description ? ' — ' + r.description : ''}`).addTo(group);
+        bounds.push([r.latitude, r.longitude]);
+      });
+      (site.roosts || []).forEach((g) => {
+        if (!g.geometry) return;
+        try { L.geoJSON(g.geometry, { style: { color: colorForRoost(g.id), weight: 3 } }).addTo(group); }
+        catch (e) { console.error('SiteMap: skipping unrenderable roost shape', e); }
+      });
+    }
+    group.addTo(map);
+    layerRef.current = group;
+    if (bounds.length > 0) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 16 });
+  }, [site, surveyId, layers.locations, layers.detectors, layers.roosts]);
+
+  return h('div', { ref: elRef, className: 'map-picker', style: { height: 400 } });
 }
 
 // ---------------- Step 1: load the site data export ----------------
@@ -413,16 +488,72 @@ function LinkMediaScreen({ onLinked, onSkip }) {
   );
 }
 
-// ---------------- Roost register (view-only) ----------------
+// ---------------- Roost register (view-only, same grouping/symbology as the internal register) ----------------
+// One card per emergenceStats-bearing thing (roost group or entrance): peak count, species, and a
+// per-visit table showing count AND the emergence window (first to last confirmed emergence that
+// visit) - Clara, 2026-09-08: "i need the peak count and the time between first emergene and last
+// emergence." The per-visit table only appears once there's more than one visit to compare, same
+// as the internal register's own convention (a single-visit entrance would just repeat the summary
+// line above it).
+function emergenceCard(code, description, roostColor, s) {
+  return h('div', { key: code, className: 'card', style: { marginBottom: 12, ...(roostColor ? { borderLeft: `4px solid ${roostColor}` } : {}) } },
+    h('div', { className: 'card-title', style: { display: 'flex', alignItems: 'center', gap: 8 } },
+      roostColor && h('span', { style: { display: 'inline-block', width: 11, height: 11, borderRadius: '50%', background: roostColor, flexShrink: 0 } }),
+      code
+    ),
+    description && h('div', { className: 'card-sub', style: { marginTop: 2 } }, description),
+    h('div', { style: { marginTop: 8 } },
+      h('strong', null, s.peakCount), ' peak count',
+      s.peakSurveyDate && h('span', { className: 'card-sub' }, ` (${s.peakSurveyDate})`)
+    ),
+    h('div', { style: { marginTop: 4 } }, s.species.size > 0 ? Array.from(s.species).join(', ') : 'No species confirmed'),
+    s.bySurvey.length > 1 && h('div', { style: { overflowX: 'auto', marginTop: 10 } },
+      h('table', { style: { borderCollapse: 'collapse', fontSize: 12 } },
+        h('thead', null, h('tr', null,
+          h('th', { style: SUMMARY_TH_STYLE }, 'Survey'), h('th', { style: SUMMARY_TH_STYLE }, 'Count'), h('th', { style: SUMMARY_TH_STYLE }, 'Emergence window')
+        )),
+        h('tbody', null, s.bySurvey.map((row) => h('tr', { key: row.surveyId },
+          h('td', { style: SUMMARY_TD_STYLE }, row.surveyDate),
+          h('td', { style: { ...SUMMARY_TD_STYLE, fontWeight: row.count === s.peakCount ? 700 : 400 } }, row.count + (row.count === s.peakCount ? ' (peak)' : '')),
+          h('td', { style: SUMMARY_TD_STYLE }, row.emergenceStart ? `${formatEmergenceTime(row.emergenceStart)} – ${formatEmergenceTime(row.emergenceEnd)}` : '—')
+        )))
+      )
+    )
+  );
+}
+
 function RoostRegisterView({ site }) {
   const stats = useMemo(() => computeRoostStats(site), [site]);
+  const groupStats = useMemo(() => computeRoostGroupStats(site), [site]);
   const [expandedId, setExpandedId] = useState(null);
+  const [surveyId, setSurveyId] = useState('all');
+  const [layers, setLayers] = useState({ locations: true, detectors: true, roosts: true });
+  function toggleLayer(k) { setLayers((l) => ({ ...l, [k]: !l[k] })); }
+
+  const roosts = site.roosts || [];
   const entrances = site.roostEntrances || [];
+  const ungrouped = entrances.filter((r) => !r.roostId || !roosts.some((g) => g.id === r.roostId));
+
+  function entranceCardWithImages(r, roostColor) {
+    const s = stats[r.id] || { peakCount: 0, peakSurveyDate: null, species: new Set(), bySurvey: [], references: [] };
+    return h('div', { key: r.id },
+      emergenceCard(r.code, r.description, roostColor, s),
+      h('button', {
+        className: 'btn btn-secondary btn-small', style: { margin: '-6px 0 12px' },
+        onClick: () => setExpandedId(expandedId === r.id ? null : r.id),
+      }, `${expandedId === r.id ? 'Hide' : 'Show'} ${s.references.length} image(s)`),
+      expandedId === r.id && h('div', { style: { margin: '-6px 0 12px', display: 'flex', flexDirection: 'column', gap: 4 } },
+        s.references.map((ref, i) => h('div', { key: i, className: 'card-sub' },
+          `${ref.surveyDate || '(no date)'} · ${ref.locationName} · ${ref.fileName} · count ${ref.count}${ref.matchedSpecies || ref.visualSpecies ? ' · ' + (ref.matchedSpecies || ref.visualSpecies) : ''}`))
+      )
+    );
+  }
+
   return h('div', { className: 'main' },
     h('div', { className: 'main-header' },
       h('div', null,
         h('div', { className: 'main-title' }, '🦇 Roost register'),
-        h('div', { className: 'main-subtitle' }, `${entrances.length} entrance(s) registered at this site`)
+        h('div', { className: 'main-subtitle' }, `${roosts.length} roost(s) · ${entrances.length} entrance(s) registered at this site`)
       )
     ),
     h('div', { className: 'content' },
@@ -430,28 +561,39 @@ function RoostRegisterView({ site }) {
         ? h('div', { className: 'empty-state' }, h('div', { className: 'empty-title' }, 'No roost entrances recorded'))
         : h('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap' } },
             h('div', { style: { flex: 2, minWidth: 320 } },
-              entrances.map((r) => {
-                const s = stats[r.id] || { peakCount: 0, species: new Set(), references: [] };
-                return h('div', { key: r.id, className: 'card', style: { marginBottom: 12 } },
-                  h('div', { className: 'card-title' }, r.code),
-                  r.description && h('div', { className: 'card-sub' }, r.description),
-                  h('div', { style: { marginTop: 8 } },
-                    h('strong', null, s.peakCount), ' peak count',
-                    s.peakSurveyDate && h('span', { className: 'card-sub' }, ` (${s.peakSurveyDate})`)
-                  ),
-                  h('div', { style: { marginTop: 4 } }, s.species.size > 0 ? Array.from(s.species).join(', ') : 'No species confirmed'),
-                  h('button', {
-                    className: 'btn btn-secondary btn-small', style: { marginTop: 10 },
-                    onClick: () => setExpandedId(expandedId === r.id ? null : r.id),
-                  }, `${expandedId === r.id ? 'Hide' : 'Show'} ${s.references.length} image(s)`),
-                  expandedId === r.id && h('div', { style: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 } },
-                    s.references.map((ref, i) => h('div', { key: i, className: 'card-sub' },
-                      `${ref.surveyDate || '(no date)'} · ${ref.locationName} · ${ref.fileName} · count ${ref.count}${ref.matchedSpecies || ref.visualSpecies ? ' · ' + (ref.matchedSpecies || ref.visualSpecies) : ''}`))
+              roosts.map((g) => {
+                const gs = groupStats[g.id] || { peakCount: 0, peakSurveyDate: null, species: new Set(), bySurvey: [] };
+                const members = entrances.filter((e) => e.roostId === g.id);
+                const roostColor = colorForRoost(g.id);
+                return h('div', { key: g.id, style: { marginBottom: 16 } },
+                  emergenceCard(g.code, g.description, roostColor, gs),
+                  h('div', { style: { marginTop: -6, paddingLeft: 14, borderLeft: '2px solid var(--border)' } },
+                    members.map((r) => entranceCardWithImages(r, roostColor))
                   )
                 );
-              })
+              }),
+              ungrouped.map((r) => entranceCardWithImages(r, null))
             ),
-            h('div', { style: { flex: 1, minWidth: 300 } }, h(EntranceMap, { site }))
+            h('div', { style: { flex: 1, minWidth: 320 } },
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 } },
+                (site.surveys || []).length > 1 && h('div', null,
+                  h('label', { style: { fontSize: 12, fontWeight: 600, marginRight: 6 } }, 'Survey visit:'),
+                  h('select', { value: surveyId, onChange: (e) => setSurveyId(e.target.value) },
+                    h('option', { value: 'all' }, 'All surveys'),
+                    (site.surveys || []).map((sv) => h('option', { key: sv.id, value: sv.id }, sv.surveyDate || '(no date)'))
+                  )
+                ),
+                h('div', { style: { display: 'flex', gap: 12, fontSize: 12, flexWrap: 'wrap' } },
+                  h('label', { style: { display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' } },
+                    h('input', { type: 'checkbox', checked: layers.locations, onChange: () => toggleLayer('locations') }), '📷 Cameras'),
+                  h('label', { style: { display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' } },
+                    h('input', { type: 'checkbox', checked: layers.detectors, onChange: () => toggleLayer('detectors') }), '🎤 Sound detectors'),
+                  h('label', { style: { display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' } },
+                    h('input', { type: 'checkbox', checked: layers.roosts, onChange: () => toggleLayer('roosts') }), '🦇 Roosts')
+                )
+              ),
+              h(SiteMap, { site, surveyId, layers })
+            )
           )
     )
   );
@@ -528,11 +670,63 @@ function findVideoHandle(mediaIndex, videoBaseName) {
 // ---------------- Sound analysis results (report only, same shape as SurveyReview's per-survey
 // results panel - no raw audio playback needed, it's a summary of species/passes/bouts already
 // recorded in the site data). ----------------
-function SoundResultsView({ site }) {
+// Renders a spectrogram for one recording on demand, synchronously on the main thread rather than
+// via dsp-worker.js's background worker (Dsp.computeSpectrogramAsync) - that worker is spun up
+// with `new Worker('dsp-worker.js')`, a path resolved against the PAGE's own origin, which breaks
+// once dsp.js itself is loaded cross-origin the way this portal reuses it (see index.html's own
+// comment). The synchronous Dsp.computeSpectrogram this worker calls internally is exposed too, and
+// a brief (sub-second) main-thread block opening one sonogram at a time - not paging rapidly
+// through hundreds of them, the scenario that motivated the worker internally - is an acceptable
+// trade rather than duplicating dsp.js/dsp-worker.js locally just to fix the relative path.
+function SonogramPopup({ recording, audioHandle, onClose }) {
+  const canvasRef = useRef(null);
+  const [status, setStatus] = useState('loading'); // loading | ready | error | missing
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!audioHandle) { setStatus('missing'); return; }
+    (async () => {
+      try {
+        const file = await audioHandle.getFile();
+        const buf = await file.arrayBuffer();
+        const parsed = Wav.parseWav(buf);
+        const spec = Dsp.computeSpectrogram(parsed.samples, parsed.sampleRate, 512);
+        if (cancelled) return;
+        const img = Dsp.renderSpectrogramImageData(spec, {
+          frameFrom: 0, frameTo: spec.numFrames - 1, binFrom: 0, binTo: spec.numBins - 1,
+          floorDb: Dsp.DEFAULT_FLOOR_DB, rangeDb: 50, saturation: 0.85,
+        });
+        const off = document.createElement('canvas');
+        off.width = img.width; off.height = img.height;
+        off.getContext('2d').putImageData(img, 0, 0);
+        const canvas = canvasRef.current;
+        canvas.width = 900; canvas.height = 300;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(off, 0, 0, 900, 300);
+        if (!cancelled) setStatus('ready');
+      } catch (e) {
+        if (!cancelled) { setError(e && e.message || String(e)); setStatus('error'); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [audioHandle]);
+
+  return h(Modal, { title: `Sonogram — ${recording.fileName}`, onClose, wide: true },
+    status === 'missing' && h('div', { className: 'warning-banner' }, 'No matching sound file found in the linked folder.'),
+    status === 'loading' && h('div', { className: 'card-sub' }, 'Decoding and rendering…'),
+    status === 'error' && h('div', { className: 'warning-banner' }, error),
+    h('canvas', { ref: canvasRef, style: { width: '100%', display: status === 'ready' ? 'block' : 'none', background: '#0a0c0e', borderRadius: 'var(--radius)' } }),
+    h('div', { className: 'modal-actions' }, h('button', { className: 'btn btn-secondary', onClick: onClose }, 'Close'))
+  );
+}
+
+function SoundResultsView({ site, mediaIndex }) {
   const surveys = site.surveys || [];
   const [surveyId, setSurveyId] = useState(surveys[0] ? surveys[0].id : null);
   const survey = surveys.find((s) => s.id === surveyId) || surveys[0];
   const stats = useMemo(() => survey ? computeSoundStats([survey]) : null, [survey]);
+  const [sonogramFor, setSonogramFor] = useState(null); // recording | null
 
   return h('div', { className: 'main' },
     h('div', { className: 'main-header' },
@@ -567,10 +761,30 @@ function SoundResultsView({ site }) {
         h('div', { className: 'section-title' }, 'By detector'),
         stats.detectorEntries.map(({ detector }) => h('div', { key: detector.id },
           h('div', { className: 'section-title', style: { fontSize: 13, margin: '12px 0 6px' } }, detector.name || '(unnamed detector)'),
-          h(SoundSummaryCard, { detector, progress: M.soundProgress(detector) })
+          h(SoundSummaryCard, { detector, progress: M.soundProgress(detector) }),
+          (detector.recordings || []).length > 0 && h('div', { style: { overflowX: 'auto', marginTop: -8, marginBottom: 16 } },
+            h('table', { style: { borderCollapse: 'collapse', fontSize: 12, width: '100%' } },
+              h('thead', null, h('tr', null,
+                h('th', { style: SUMMARY_TH_STYLE }, 'Time'), h('th', { style: SUMMARY_TH_STYLE }, 'File'),
+                h('th', { style: SUMMARY_TH_STYLE }, 'Species'), h('th', { style: SUMMARY_TH_STYLE }, '')
+              )),
+              h('tbody', null, (detector.recordings || []).map((rec) => h('tr', { key: rec.id },
+                h('td', { style: SUMMARY_TD_STYLE }, rec.dateTimeIso ? new Date(rec.dateTimeIso).toLocaleTimeString() : '—'),
+                h('td', { style: SUMMARY_TD_STYLE }, rec.fileName),
+                h('td', { style: SUMMARY_TD_STYLE }, recordingSpeciesLabel(rec.analysis) || '—'),
+                h('td', { style: SUMMARY_TD_STYLE },
+                  h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => setSonogramFor(rec) }, '🔬 Sonogram'))
+              )))
+            )
+          )
         ))
       )
-    )
+    ),
+    sonogramFor && h(SonogramPopup, {
+      recording: sonogramFor,
+      audioHandle: mediaIndex ? mediaIndex.get((sonogramFor.fileName || '').toLowerCase()) : null,
+      onClose: () => setSonogramFor(null),
+    })
   );
 }
 
@@ -579,9 +793,17 @@ function SoundResultsView({ site }) {
 function OutputsView({ site, mediaIndex }) {
   const usedNames = useMemo(() => {
     const used = new Set();
-    (site.surveys || []).forEach((survey) => (survey.locations || []).forEach((loc) => (loc.images || []).forEach((img) => {
-      used.add(img.fileName.toLowerCase());
-    })));
+    (site.surveys || []).forEach((survey) => {
+      (survey.locations || []).forEach((loc) => (loc.images || []).forEach((img) => {
+        used.add(img.fileName.toLowerCase());
+      }));
+      // Sound recordings are already surfaced (with a "View sonogram" button) under Sound
+      // analysis - marking them used here too so they don't also show up as an unexplained
+      // "extra" file in Outputs.
+      (survey.soundDetectors || []).forEach((det) => (det.recordings || []).forEach((rec) => {
+        if (rec.fileName) used.add(rec.fileName.toLowerCase());
+      }));
+    });
     if (mediaIndex) {
       for (const [name] of mediaIndex.entries()) {
         if (VIDEO_EXT.test(name)) {
@@ -635,6 +857,52 @@ function OutputsView({ site, mediaIndex }) {
   );
 }
 
+// ---------------- Survey info (date, weather, sunset, timing, personnel) ----------------
+// survey.personnel only ever holds {surveyorId, role} in the app's own live data - resolving a
+// name normally needs a connection to the shared org-wide surveyor register, which this offline
+// portal deliberately doesn't have. exportSiteToFile now also bakes a `surveyorName` onto each
+// entry at export time (the one place that IS online), so this falls back to "(name unresolved -
+// re-export from a newer version of SurveyReview)" only for a JSON exported before that existed.
+function SurveyInfoView({ site }) {
+  const surveys = site.surveys || [];
+  return h('div', { className: 'main' },
+    h('div', { className: 'main-header' },
+      h('div', null,
+        h('div', { className: 'main-title' }, 'ℹ️ Survey info'),
+        h('div', { className: 'main-subtitle' }, `${surveys.length} survey visit(s)`)
+      )
+    ),
+    h('div', { className: 'content' },
+      h('div', { className: 'card', style: { marginBottom: 16 } },
+        h('div', { className: 'card-title' }, site.siteName || '(untitled site)'),
+        site.client && h('div', { className: 'card-sub', style: { marginTop: 2 } }, site.client)
+      ),
+      surveys.length === 0
+        ? h('div', { className: 'empty-state' }, h('div', { className: 'empty-title' }, 'No survey visits recorded'))
+        : surveys.map((sv) => h('div', { key: sv.id, className: 'card', style: { marginBottom: 12 } },
+            h('div', { className: 'card-title' }, sv.surveyDate || '(no date)'),
+            h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10, marginTop: 10, fontSize: 13 } },
+              h('div', null, h('div', { className: 'card-sub' }, 'Weather'), sv.weather || '—'),
+              h('div', null, h('div', { className: 'card-sub' }, 'Sunset'), sv.sunset || '—'),
+              h('div', null, h('div', { className: 'card-sub' }, 'Survey start'), sv.surveyStart || '—'),
+              h('div', null, h('div', { className: 'card-sub' }, 'Survey end'), sv.surveyEnd || '—'),
+              h('div', null, h('div', { className: 'card-sub' }, 'Cameras'), (sv.locations || []).length),
+              h('div', null, h('div', { className: 'card-sub' }, 'Sound detectors'), (sv.soundDetectors || []).length)
+            ),
+            h('div', { style: { marginTop: 10 } },
+              h('div', { className: 'card-sub', style: { marginBottom: 4 } }, 'Site personnel'),
+              (sv.personnel || []).length === 0
+                ? h('div', { style: { fontSize: 13 } }, '—')
+                : h('div', { style: { fontSize: 13 } },
+                    (sv.personnel || []).map((p) =>
+                      `${p.surveyorName || '(name unresolved - re-export from a newer version of SurveyReview)'}${p.role ? ' — ' + p.role : ''}`
+                    ).join(', '))
+            )
+          ))
+    )
+  );
+}
+
 // ---------------- App shell ----------------
 function App() {
   const [site, setSite] = useState(null);
@@ -648,6 +916,7 @@ function App() {
     ['roost', '🦇 Roost register'],
     ['observations', '📷 Observations'],
     ['sound', '🔊 Sound analysis'],
+    ['info', 'ℹ️ Survey info'],
     ['outputs', '📤 Outputs'],
   ];
   return h('div', { className: 'app-shell' },
@@ -664,7 +933,8 @@ function App() {
     ),
     tab === 'roost' && h(RoostRegisterView, { site }),
     tab === 'observations' && h(ObservationsView, { site, mediaIndex }),
-    tab === 'sound' && h(SoundResultsView, { site }),
+    tab === 'sound' && h(SoundResultsView, { site, mediaIndex }),
+    tab === 'info' && h(SurveyInfoView, { site }),
     tab === 'outputs' && h(OutputsView, { site, mediaIndex })
   );
 }
