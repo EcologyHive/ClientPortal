@@ -600,8 +600,34 @@ function RoostRegisterView({ site }) {
 }
 
 // ---------------- Observations (species + video popup only, no editing) ----------------
+// Opens the same zoom/pan viewer QA review uses for a WIS still, resolved by exact filename from
+// the linked handover folder - Clara, 2026-09-08: "with the WIS image - similar behaviour - you
+// click it and it opens a viewer (nice zoom and move behaviours)."
+function WisImagePopup({ image, imageHandle, onClose }) {
+  const [imgUrl, setImgUrl] = useState(null);
+  const [status, setStatus] = useState('loading'); // loading | ready | missing
+  useEffect(() => {
+    let cancelled = false;
+    if (!imageHandle) { setStatus('missing'); return; }
+    (async () => {
+      const url = await F.getFileBlobUrl(imageHandle);
+      if (!cancelled) { setImgUrl(url); setStatus('ready'); } else URL.revokeObjectURL(url);
+    })();
+    return () => { cancelled = true; };
+  }, [imageHandle]);
+  useEffect(() => () => { if (imgUrl) URL.revokeObjectURL(imgUrl); }, [imgUrl]);
+
+  return h(Modal, { title: `WIS still — ${image.fileName}`, onClose, wide: true },
+    status === 'missing' && h('div', { className: 'warning-banner' }, 'No matching image found in the linked folder.'),
+    status === 'ready' && h(ZoomableImage, { src: imgUrl, alt: image.fileName }),
+    h('div', { className: 'modal-actions' }, h('button', { className: 'btn btn-secondary', onClick: onClose }, 'Close'))
+  );
+}
+
 function ObservationsView({ site, mediaIndex }) {
   const [openVideoFor, setOpenVideoFor] = useState(null); // image | null
+  const [openImageFor, setOpenImageFor] = useState(null); // image | null
+  const [sonogramFor, setSonogramFor] = useState(null); // SoundRecording | null
   const rows = useMemo(() => {
     const out = [];
     (site.surveys || []).forEach((survey) => {
@@ -613,7 +639,7 @@ function ObservationsView({ site, mediaIndex }) {
           const entranceCodes = (img.emergingRoosts || [])
             .map((e) => (site.roostEntrances || []).find((r) => r.id === e.roostEntranceId))
             .filter(Boolean).map((r) => r.code);
-          out.push({ survey, location: loc, image: img, species, entranceCodes });
+          out.push({ survey, location: loc, image: img, species, entranceCodes, matched });
         });
       });
     });
@@ -641,10 +667,22 @@ function ObservationsView({ site, mediaIndex }) {
               h('tbody', null, rows.map((row, i) => h('tr', { key: i },
                 h('td', { style: SUMMARY_TD_STYLE }, row.survey.surveyDate || '—'),
                 h('td', { style: SUMMARY_TD_STYLE }, row.location.name || '(unnamed)'),
-                h('td', { style: SUMMARY_TD_STYLE }, row.image.fileName),
+                h('td', { style: SUMMARY_TD_STYLE },
+                  h('span', {
+                    style: { color: 'var(--accent)', cursor: 'pointer' }, title: 'Open WIS still',
+                    onClick: () => setOpenImageFor(row.image),
+                  }, row.image.fileName)),
                 h('td', { style: SUMMARY_TD_STYLE }, row.entranceCodes.join(', ') || '—'),
                 h('td', { style: SUMMARY_TD_STYLE },
-                  row.species ? h('span', { style: { background: speciesPillColor(row.species), color: '#0a0c0e', borderRadius: 100, padding: '2px 9px', fontSize: 11, fontWeight: 700 } }, row.species) : '—'),
+                  !row.species ? '—' : h('span', {
+                    style: {
+                      background: speciesPillColor(row.species), color: '#0a0c0e', borderRadius: 100, padding: '2px 9px',
+                      fontSize: 11, fontWeight: 700, border: 'none', font: 'inherit',
+                      cursor: row.matched ? 'pointer' : 'default',
+                    },
+                    title: row.matched ? 'View sonogram' : 'No matched sound recording',
+                    onClick: row.matched ? () => setSonogramFor(row.matched.recording) : undefined,
+                  }, row.species)),
                 h('td', { style: SUMMARY_TD_STYLE },
                   row.image.videoBaseName && h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => setOpenVideoFor(row.image) }, '🎬 Video'))
               )))
@@ -655,6 +693,16 @@ function ObservationsView({ site, mediaIndex }) {
       image: openVideoFor,
       videoHandle: mediaIndex ? findVideoHandle(mediaIndex, openVideoFor.videoBaseName) : null,
       onClose: () => setOpenVideoFor(null),
+    }),
+    openImageFor && h(WisImagePopup, {
+      image: openImageFor,
+      imageHandle: mediaIndex ? mediaIndex.get((openImageFor.fileName || '').toLowerCase()) : null,
+      onClose: () => setOpenImageFor(null),
+    }),
+    sonogramFor && h(SonogramPopup, {
+      recording: sonogramFor,
+      audioHandle: mediaIndex ? mediaIndex.get((sonogramFor.fileName || '').toLowerCase()) : null,
+      onClose: () => setSonogramFor(null),
     })
   );
 }
