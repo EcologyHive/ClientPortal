@@ -707,7 +707,9 @@ function ObservationsView({ site, mediaIndex }) {
           const entranceCodes = (img.emergingRoosts || [])
             .map((e) => (site.roostEntrances || []).find((r) => r.id === e.roostEntranceId))
             .filter(Boolean).map((r) => r.code);
-          out.push({ survey, location: loc, image: img, species, entranceCodes, matched });
+          const labelObj = img.label ? M.findLabel(site, img.label) : null;
+          const labelName = labelObj ? labelObj.name : (img.label || '');
+          out.push({ survey, location: loc, image: img, species, entranceCodes, matched, labelName });
         });
       });
     });
@@ -729,7 +731,8 @@ function ObservationsView({ site, mediaIndex }) {
             h('table', { style: { borderCollapse: 'collapse', fontSize: 13, width: '100%' } },
               h('thead', null, h('tr', null,
                 h('th', { style: SUMMARY_TH_STYLE }, 'Date'), h('th', { style: SUMMARY_TH_STYLE }, 'Location'),
-                h('th', { style: SUMMARY_TH_STYLE }, 'File'), h('th', { style: SUMMARY_TH_STYLE }, 'Entrance(s)'),
+                h('th', { style: SUMMARY_TH_STYLE }, 'File'), h('th', { style: SUMMARY_TH_STYLE }, 'Label'),
+                h('th', { style: SUMMARY_TH_STYLE }, 'Entrance(s)'),
                 h('th', { style: SUMMARY_TH_STYLE }, 'Species'), h('th', { style: SUMMARY_TH_STYLE }, '')
               )),
               h('tbody', null, rows.map((row, i) => h('tr', { key: i },
@@ -740,6 +743,7 @@ function ObservationsView({ site, mediaIndex }) {
                     style: { color: 'var(--accent)', cursor: 'pointer' }, title: 'Open WIS still',
                     onClick: () => setOpenImageFor(row.image),
                   }, row.image.fileName)),
+                h('td', { style: SUMMARY_TD_STYLE }, row.labelName || '—'),
                 h('td', { style: SUMMARY_TD_STYLE }, row.entranceCodes.join(', ') || '—'),
                 h('td', { style: SUMMARY_TD_STYLE },
                   !row.species ? '—' : h('span', {
