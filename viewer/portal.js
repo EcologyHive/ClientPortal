@@ -192,7 +192,8 @@ function computeSoundStats(surveys) {
         bySpecies[s.species].totalPasses += s.passCount;
         bySpecies[s.species].references.push({
           surveyId: survey.id, surveyDate: survey.surveyDate || '(no date)', detectorId: det.id,
-          detectorName: det.name || '(unnamed detector)', boutCount: s.boutCount, passCount: s.passCount,
+          detectorName: det.name || '(unnamed detector)', latitude: det.latitude, longitude: det.longitude,
+          boutCount: s.boutCount, passCount: s.passCount,
         });
       });
     });
@@ -501,6 +502,116 @@ function SiteMap({ site, surveyId, layers }) {
         pointerEvents: 'none', textAlign: 'center',
       },
     }, 'Basemap imagery requires an internet connection. Survey features remain available offline.')
+  );
+}
+
+function BaseLayerToggle({ baseLayerKey, onChange }) {
+  return h('div', { style: { position: 'absolute', top: 8, right: 8, zIndex: 1000, display: 'flex', gap: 4 } },
+    h('button', { className: 'btn btn-secondary btn-small' + (baseLayerKey === 'satellite' ? ' speed-btn-active' : ''), onClick: () => onChange('satellite') }, 'Satellite'),
+    h('button', { className: 'btn btn-secondary btn-small' + (baseLayerKey === 'streets' ? ' speed-btn-active' : ''), onClick: () => onChange('streets') }, 'Streets')
+  );
+}
+
+// Weighted detector map for one species at a time, sized by pass count - the same map SurveyReview's
+// own SoundAnalysisResultsWorkspace uses (its SpeciesLocationMap), ported here trimmed to what a
+// read-only viewer needs. Clara, 2026-09-08: "i want to add the map widget we have in sound analysis
+// results per survey visit, circles with size proportionate to number of calls." Scoped to whichever
+// survey is currently selected in SoundResultsView (speciesList is already built from just that one
+// visit's stats), same offline tile degradation as SiteMap.
+function SpeciesLocationMap({ speciesList }) {
+  const elRef = useRef(null);
+  const mapRef = useRef(null);
+  const layerRef = useRef(null);
+  const baseLayerRef = useRef(null);
+  const [baseLayerKey, setBaseLayerKey] = useState(SR.Map.DEFAULT_BASE_LAYER);
+  const [selectedSpecies, setSelectedSpecies] = useState(speciesList[0] ? speciesList[0].species : null);
+  const [tilesUnavailable, setTilesUnavailable] = useState(typeof navigator !== 'undefined' && navigator.onLine === false);
+
+  useEffect(() => {
+    const map = L.map(elRef.current, { zoomControl: true }).setView([52.2, -2.22], 6);
+    mapRef.current = map;
+    setTimeout(() => map.invalidateSize(), 50);
+    const handleOffline = () => setTilesUnavailable(true);
+    const handleOnline = () => setTilesUnavailable(false);
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', handleOnline);
+      try { map.remove(); } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (baseLayerRef.current) map.removeLayer(baseLayerRef.current);
+    const layer = SR.Map.makeTileLayer(baseLayerKey);
+    layer.on('tileerror', () => setTilesUnavailable(true));
+    layer.on('tileload', () => setTilesUnavailable(false));
+    baseLayerRef.current = layer.addTo(map);
+    baseLayerRef.current.bringToBack();
+  }, [baseLayerKey]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (layerRef.current) { try { map.removeLayer(layerRef.current); } catch (e) {} }
+    const group = L.layerGroup();
+    const bounds = [];
+    const species = speciesList.find((s) => s.species === selectedSpecies);
+    if (species) {
+      // A detector can show up more than once (different survey nights, though this map is already
+      // scoped to one visit by the caller) - combine to one marker per physical point regardless.
+      const byPoint = new Map();
+      species.references.forEach((ref) => {
+        if (!isFiniteCoord(ref.latitude) || !isFiniteCoord(ref.longitude)) return;
+        const key = `${ref.latitude.toFixed(6)},${ref.longitude.toFixed(6)}`;
+        const existing = byPoint.get(key);
+        if (existing) { existing.passes += ref.passCount; existing.bouts += ref.boutCount; existing.visits.push(ref); }
+        else byPoint.set(key, { latitude: ref.latitude, longitude: ref.longitude, passes: ref.passCount, bouts: ref.boutCount, visits: [ref] });
+      });
+      // Sized by passes, not bouts - the more direct read of "how much activity happened here."
+      const maxPasses = Math.max(1, ...Array.from(byPoint.values()).map((p) => p.passes));
+      byPoint.forEach((p) => {
+        try {
+          const radius = 8 + (p.passes / maxPasses) * 22;
+          const label = p.visits.map((v) => `${v.detectorName}: ${v.passCount} pass(es), ${v.boutCount} bout(s)`).join('<br>');
+          L.circleMarker([p.latitude, p.longitude], {
+            radius, color: '#0F5C5C', weight: 2, fillColor: '#F68A15', fillOpacity: 0.6,
+          }).bindTooltip(`<strong>${p.passes} pass(es), ${p.bouts} bout(s) total</strong><br>${label}`).addTo(group);
+          bounds.push([p.latitude, p.longitude]);
+        } catch (e) {
+          console.error('SpeciesLocationMap: skipping unrenderable point', e);
+        }
+      });
+    }
+    group.addTo(map);
+    layerRef.current = group;
+    if (bounds.length > 0) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 16 });
+  }, [selectedSpecies, speciesList]);
+
+  return h('div', null,
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 } },
+      h('label', { style: { fontSize: 13, fontWeight: 600 } }, 'Species:'),
+      h('select', { value: selectedSpecies || '', onChange: (e) => setSelectedSpecies(e.target.value) },
+        speciesList.map((s) => h('option', { key: s.species, value: s.species }, s.species))
+      )
+    ),
+    h('div', { className: 'map-picker', style: { height: 480, position: 'relative' } },
+      h('div', { ref: elRef, style: { height: '100%', width: '100%', background: tilesUnavailable ? '#e5e7eb' : undefined } }),
+      h(BaseLayerToggle, { baseLayerKey, onChange: setBaseLayerKey }),
+      tilesUnavailable && h('div', {
+        style: {
+          position: 'absolute', top: 8, left: 8, right: 96, zIndex: 1000,
+          background: 'rgba(255,255,255,0.92)', color: '#1f2937', fontSize: 12,
+          padding: '6px 10px', borderRadius: 6, border: '1px solid rgba(0,0,0,0.15)',
+          pointerEvents: 'none', textAlign: 'center',
+        },
+      }, 'Basemap imagery requires an internet connection. Survey features remain available offline.')
+    ),
+    h('div', { className: 'card-sub', style: { marginTop: 8 } }, 'Circle size = total passes recorded at that point this visit. Hover a circle for the per-detector breakdown (passes and bouts).')
   );
 }
 
@@ -973,21 +1084,52 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
   );
 }
 
-// Matches the internal SoundAnalysisResultsWorkspace's own layout exactly (segmented By species/By
-// location, one species-per-card table) - Clara, 2026-09-08: "please replicate our sound analysis
-// output (by survey date) looks better than the existing one." Previously this showed the species
-// summary AND every detector's full recording list stacked one after another, always - the segmented
-// control is what actually declutters it, showing one or the other rather than both at once. No Map
-// mode (SpeciesLocationMap is an internal-only component not yet ported) and no "Open →" per-species
-// row (there's nowhere to jump to in a read-only client viewer) - By location below already covers
-// getting to an actual recording/sonogram.
+// A detector's own recordings list, collapsed by default - Clara, 2026-09-08: "the list of calls
+// below the summary of each detector - can we make it a expandable menu rather than having the list
+// take over the screen?" A busy night can run to hundreds of recordings; the summary card above
+// already answers "what did this detector find," so the raw per-file list is opt-in detail, not the
+// default view.
+function DetectorRecordingsSection({ detector, onOpenSonogram }) {
+  const [expanded, setExpanded] = useState(false);
+  const recordings = detector.recordings || [];
+  return h('div', { style: { marginBottom: 16 } },
+    h('div', { className: 'section-title', style: { fontSize: 13, margin: '0 0 6px' } }, detector.name || '(unnamed detector)'),
+    h(SoundSummaryCard, { detector, progress: M.soundProgress(detector) }),
+    recordings.length > 0 && h('div', { style: { marginTop: -8 } },
+      h('button', { className: 'btn btn-secondary btn-small', onClick: () => setExpanded((e) => !e) },
+        expanded ? '▾ Hide recordings' : `▸ Show ${recordings.length} recording(s)`),
+      expanded && h('div', { style: { overflowX: 'auto', marginTop: 10 } },
+        h('table', { style: { borderCollapse: 'collapse', fontSize: 12, width: '100%' } },
+          h('thead', null, h('tr', null,
+            h('th', { style: SUMMARY_TH_STYLE }, 'Time'), h('th', { style: SUMMARY_TH_STYLE }, 'File'),
+            h('th', { style: SUMMARY_TH_STYLE }, 'Species'), h('th', { style: SUMMARY_TH_STYLE }, '')
+          )),
+          h('tbody', null, recordings.map((rec) => h('tr', { key: rec.id },
+            h('td', { style: SUMMARY_TD_STYLE }, rec.dateTimeIso ? new Date(rec.dateTimeIso).toLocaleTimeString() : '—'),
+            h('td', { style: SUMMARY_TD_STYLE }, rec.fileName),
+            h('td', { style: SUMMARY_TD_STYLE }, recordingSpeciesLabel(rec.analysis) || '—'),
+            h('td', { style: SUMMARY_TD_STYLE },
+              h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => onOpenSonogram(rec) }, '🔬 Sonogram'))
+          )))
+        )
+      )
+    )
+  );
+}
+
+// Matches the internal SoundAnalysisResultsWorkspace's own layout (segmented By species/By
+// location/Map, one species-per-card table, SpeciesLocationMap) - Clara, 2026-09-08: "please
+// replicate our sound analysis output (by survey date) looks better than the existing one," and
+// later "i want to add the map widget we have in sound analysis results per survey visit." No
+// "Open →" per-species row (there's nowhere to jump to in a read-only client viewer) - By location
+// already covers getting to an actual recording/sonogram.
 function SoundResultsView({ site, mediaIndex }) {
   const surveys = site.surveys || [];
   const [surveyId, setSurveyId] = useState(surveys[0] ? surveys[0].id : null);
   const survey = surveys.find((s) => s.id === surveyId) || surveys[0];
   const stats = useMemo(() => survey ? computeSoundStats([survey]) : null, [survey]);
   const [sonogramFor, setSonogramFor] = useState(null); // recording | null
-  const [mode, setMode] = useState('species'); // 'species' | 'location'
+  const [mode, setMode] = useState('species'); // 'species' | 'location' | 'map'
 
   return h('div', { className: 'main' },
     h('div', { className: 'main-header' },
@@ -995,15 +1137,20 @@ function SoundResultsView({ site, mediaIndex }) {
         h('div', { className: 'main-title' }, '🔊 Sound analysis results'),
         stats && h('div', { className: 'main-subtitle' },
           `${stats.speciesList.length} species confirmed · ${stats.totalAnalysed}/${stats.totalRecordings} recording(s) analysed across ${stats.detectorCount} detector(s)`)
-      ),
-      surveys.length > 1 && h('select', { value: surveyId || '', onChange: (e) => setSurveyId(e.target.value) },
-        surveys.map((s) => h('option', { key: s.id, value: s.id }, s.surveyDate || '(no date)')))
+      )
     ),
     h('div', { className: 'content' },
       !survey && h('div', { className: 'empty-state' }, h('div', { className: 'empty-title' }, 'No survey nights recorded')),
-      survey && h('div', { className: 'segmented', style: { marginBottom: 16, maxWidth: 280 } },
-        h('button', { className: `segment ${mode === 'species' ? 'segment-active' : ''}`, onClick: () => setMode('species') }, 'By species'),
-        h('button', { className: `segment ${mode === 'location' ? 'segment-active' : ''}`, onClick: () => setMode('location') }, 'By location')
+      // Date picker moved in next to the segmented control - Clara, 2026-09-08: "move the date
+      // picker next to by species and by location" - rather than sitting alone in the header.
+      survey && h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' } },
+        h('div', { className: 'segmented', style: { maxWidth: 360 } },
+          h('button', { className: `segment ${mode === 'species' ? 'segment-active' : ''}`, onClick: () => setMode('species') }, 'By species'),
+          h('button', { className: `segment ${mode === 'location' ? 'segment-active' : ''}`, onClick: () => setMode('location') }, 'By location'),
+          h('button', { className: `segment ${mode === 'map' ? 'segment-active' : ''}`, onClick: () => setMode('map'), disabled: stats.speciesList.length === 0 }, '🗺 Map')
+        ),
+        surveys.length > 1 && h('select', { value: surveyId || '', onChange: (e) => setSurveyId(e.target.value) },
+          surveys.map((s) => h('option', { key: s.id, value: s.id }, s.surveyDate || '(no date)')))
       ),
 
       survey && mode === 'species' && stats.speciesList.length === 0 && h('div', { className: 'empty-state' },
@@ -1026,25 +1173,11 @@ function SoundResultsView({ site, mediaIndex }) {
 
       survey && mode === 'location' && stats.detectorEntries.length === 0 && h('div', { className: 'empty-state' },
         h('div', { className: 'empty-title' }, 'No recordings imported yet')),
-      survey && mode === 'location' && stats.detectorEntries.map(({ detector }) => h('div', { key: detector.id, style: { marginBottom: 16 } },
-        h('div', { className: 'section-title', style: { fontSize: 13, margin: '0 0 6px' } }, detector.name || '(unnamed detector)'),
-        h(SoundSummaryCard, { detector, progress: M.soundProgress(detector) }),
-        (detector.recordings || []).length > 0 && h('div', { style: { overflowX: 'auto', marginTop: -8 } },
-          h('table', { style: { borderCollapse: 'collapse', fontSize: 12, width: '100%' } },
-            h('thead', null, h('tr', null,
-              h('th', { style: SUMMARY_TH_STYLE }, 'Time'), h('th', { style: SUMMARY_TH_STYLE }, 'File'),
-              h('th', { style: SUMMARY_TH_STYLE }, 'Species'), h('th', { style: SUMMARY_TH_STYLE }, '')
-            )),
-            h('tbody', null, (detector.recordings || []).map((rec) => h('tr', { key: rec.id },
-              h('td', { style: SUMMARY_TD_STYLE }, rec.dateTimeIso ? new Date(rec.dateTimeIso).toLocaleTimeString() : '—'),
-              h('td', { style: SUMMARY_TD_STYLE }, rec.fileName),
-              h('td', { style: SUMMARY_TD_STYLE }, recordingSpeciesLabel(rec.analysis) || '—'),
-              h('td', { style: SUMMARY_TD_STYLE },
-                h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => setSonogramFor(rec) }, '🔬 Sonogram'))
-            )))
-          )
-        )
-      ))
+      survey && mode === 'location' && stats.detectorEntries.map(({ detector }) => h(DetectorRecordingsSection, {
+        key: detector.id, detector, onOpenSonogram: setSonogramFor,
+      })),
+
+      survey && mode === 'map' && h(SpeciesLocationMap, { speciesList: stats.speciesList })
     ),
     sonogramFor && h(SonogramPopup, {
       recording: sonogramFor,
@@ -1164,14 +1297,28 @@ function personnelRowsFor(surveys) {
   return Array.from(map.values());
 }
 
-function summaryTable(rows, columns) {
-  if (!rows || rows.length === 0) return h('div', { className: 'card-sub' }, 'Nothing recorded.');
-  return h('div', { style: { overflowX: 'auto' } },
-    h('table', { style: { borderCollapse: 'collapse', width: '100%' } },
-      h('thead', null, h('tr', null, columns.map((c) => h('th', { key: c.key, style: SUMMARY_TH_STYLE }, c.header)))),
-      h('tbody', null, rows.map((row, i) => h('tr', { key: i }, columns.map((c) => h('td', { key: c.key, style: SUMMARY_TD_STYLE }, row[c.key])))))
-    )
+// A single pill-shaped entry (rounded capsule, primary field bold + short "· tag" fields inline) -
+// Clara, 2026-09-08: "give everything a pill look rather than table - those tables do not look good
+// here." Replaces summaryTable for every Summary section: each record here is one flat item
+// (a person, a piece of equipment, a roost), not a dataset worth a grid of columns.
+function pillEntry(key, primary, tags) {
+  const clean = (tags || []).filter((t) => t !== null && t !== undefined && t !== '');
+  return h('div', {
+    key,
+    style: {
+      display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 6,
+      padding: '9px 16px', borderRadius: 999, background: 'var(--bg-card)',
+      border: '1px solid var(--border)', marginBottom: 8, fontSize: 12.5, lineHeight: 1.4,
+    },
+  },
+    h('span', { style: { fontWeight: 700 } }, primary),
+    clean.map((t, i) => h('span', { key: i, style: { color: 'var(--text-muted)' } }, `· ${t}`))
   );
+}
+
+function pillList(entries) {
+  if (!entries || entries.length === 0) return h('div', { className: 'card-sub' }, 'Nothing recorded.');
+  return h('div', null, entries);
 }
 
 function SummaryView({ site }) {
@@ -1212,13 +1359,20 @@ function SummaryView({ site }) {
           key: k, style: { display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 13 },
         }, h('div', { style: { fontWeight: 600, width: 190, color: 'var(--accent)', flexShrink: 0 } }, k), h('div', null, v)))
       ),
+      // Clara, 2026-09-08: "move constraints above personnel" - the one section a client is most
+      // likely to actually need to act on (missed coverage, a limitation to bear in mind) reads
+      // better ahead of the who/what-equipment reference sections below it.
+      h('div', { className: 'section-title' }, 'Survey constraints'),
+      pillList(buildConstraintRows(surveys).map((r, i) => pillEntry(i, `⚠️ ${r.SurveyDate || '(no date)'}`, [
+        r.AffectedEquipment, r.Description, r.Mitigation && `Mitigation: ${r.Mitigation}`,
+      ]))),
       h('div', { className: 'section-title' }, 'Personnel'),
-      summaryTable(personnelRowsFor(surveys), [{ key: 'Name', header: 'Name' }, { key: 'Role', header: 'Role' }]),
+      pillList(personnelRowsFor(surveys).map((p, i) => pillEntry(i, `👤 ${p.Name}`, [p.Role]))),
       h('div', { className: 'section-title' }, 'Equipment'),
-      summaryTable(buildEquipmentListRows(surveys), [
-        { key: 'SurveyDate', header: 'Survey date' }, { key: 'Type', header: 'Type' }, { key: 'Name', header: 'Name' },
-        { key: 'EquipmentUnitId', header: 'Unit ID' }, { key: 'Kit', header: 'Kit' }, { key: 'Latitude', header: 'Latitude' }, { key: 'Longitude', header: 'Longitude' },
-      ]),
+      pillList(buildEquipmentListRows(surveys).map((r, i) => pillEntry(i, `${r.Type === 'Camera location' ? '📷' : '🎤'} ${r.Name || '(unnamed)'}`, [
+        r.Type, r.SurveyDate, r.Kit, r.EquipmentUnitId && `Unit ID: ${r.EquipmentUnitId}`,
+        (r.Latitude !== '' && r.Longitude !== '') ? `${r.Latitude}, ${r.Longitude}` : null,
+      ]))),
       // A wide table crammed Weather/Sunset/Start/End/Equipment/Personnel into one horizontally-
       // scrolling row per visit - Clara, 2026-09-08: "i do not like how you have deployed weather
       // sunset etc in only line, can you split it in boxes so it looks like a nice and tidy table."
@@ -1241,23 +1395,17 @@ function SummaryView({ site }) {
       }),
 
       h('div', { className: 'section-title' }, 'Roost register summary'),
-      summaryTable(roostRows, [
-        { key: 'Ref', header: 'Roost ref' }, { key: 'Count', header: 'Count' }, { key: 'Date', header: 'Date' }, { key: 'Species', header: 'Species' },
-      ]),
+      pillList(roostRows.map((r, i) => pillEntry(i, `🦇 ${r.Ref}`, [`${r.Count} peak count`, r.Date, r.Species]))),
 
       h('div', { className: 'section-title' }, 'Thermal camera results — summary'),
-      summaryTable(buildThermalSummaryRows(site, surveys), [
-        { key: 'SurveyDate', header: 'Date' }, { key: 'Location', header: 'Location' }, { key: 'ImagesReviewed', header: 'Images reviewed' },
-        { key: 'LabelBreakdown', header: 'Labelled frames' }, { key: 'SpeciesIdentified', header: 'Species identified' }, { key: 'RoostEmergenceRecorded', header: 'Roost emergence recorded' },
-      ]),
-      // Acoustic bat detector summary removed here - Clara, 2026-09-08: "Acoustic detector summary
+      pillList(buildThermalSummaryRows(site, surveys).map((r, i) => pillEntry(i, `📷 ${r.Location}`, [
+        r.SurveyDate, `${r.ImagesReviewed} images reviewed`, r.LabelBreakdown, r.SpeciesIdentified,
+        r.RoostEmergenceRecorded === 'Yes' && 'Roost emergence recorded',
+      ])))
+      // Acoustic bat detector summary omitted here - Clara, 2026-09-08: "Acoustic detector summary
       // - remove from summary - too cluttered in the current format." The Sound analysis tab's own
       // "By species" view (just replicated from the internal tool's own layout) already covers this
       // properly.
-      h('div', { className: 'section-title' }, 'Survey constraints'),
-      summaryTable(buildConstraintRows(surveys), [
-        { key: 'SurveyDate', header: 'Date' }, { key: 'AffectedEquipment', header: 'Affected' }, { key: 'Description', header: 'Description' }, { key: 'Mitigation', header: 'Mitigation' },
-      ])
     )
   );
 }
