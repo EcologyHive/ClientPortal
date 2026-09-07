@@ -377,6 +377,14 @@ function VideoPopup({ image, videoHandle, onClose }) {
 // component's full editing-adjacent complexity across for a read-only view. Clara, 2026-09-07/08:
 // "they can... toggle on and off cameras and sound detectors" and "check survey date they want to
 // check." ----------------
+function isFiniteCoord(v) { return typeof v === 'number' && isFinite(v); }
+function averageLatLon(points) {
+  if (!points || !points.length) return null;
+  const lat = points.reduce((sum, p) => sum + p[0], 0) / points.length;
+  const lon = points.reduce((sum, p) => sum + p[1], 0) / points.length;
+  return [lat, lon];
+}
+
 function SiteMap({ site, surveyId, layers }) {
   const elRef = useRef(null);
   const mapRef = useRef(null);
@@ -413,15 +421,52 @@ function SiteMap({ site, surveyId, layers }) {
       }));
     }
     if (layers.roosts) {
-      (site.roostEntrances || []).forEach((r) => {
-        if (typeof r.latitude !== 'number' || typeof r.longitude !== 'number') return;
-        L.marker([r.latitude, r.longitude], { icon: SR.Map.iconFor('roost') }).bindTooltip(`${r.code}${r.description ? ' — ' + r.description : ''}`).addTo(group);
+      // Only roosts actually identified on the chosen visit, not every roost the Site has ever had
+      // - Clara, 2026-09-08: "if 1 survey date chosen - show only roosts identified on such date
+      // (currently shows all roosts)." "Identified" means a real (>0) count that visit, same
+      // definition the register's own peak-count logic uses.
+      const identifiedOn = (bySurvey) => surveyId === 'all' || bySurvey.some((b) => b.surveyId === surveyId && b.count > 0);
+      const entranceStats = computeRoostStats(site);
+      const groupStats = computeRoostGroupStats(site);
+      const shownEntrances = (site.roostEntrances || []).filter((r) => identifiedOn((entranceStats[r.id] || { bySurvey: [] }).bySurvey));
+      const shownGroups = (site.roosts || []).filter((g) => identifiedOn((groupStats[g.id] || { bySurvey: [] }).bySurvey));
+
+      shownEntrances.forEach((r) => {
+        if (!isFiniteCoord(r.latitude) || !isFiniteCoord(r.longitude)) return;
+        L.marker([r.latitude, r.longitude], { icon: SR.Map.iconFor('roost'), opacity: 0.85 }).bindTooltip(`${r.code}${r.description ? ' — ' + r.description : ''}`).addTo(group);
         bounds.push([r.latitude, r.longitude]);
       });
-      (site.roosts || []).forEach((g) => {
-        if (!g.geometry) return;
-        try { L.geoJSON(g.geometry, { style: { color: colorForRoost(g.id), weight: 3 } }).addTo(group); }
-        catch (e) { console.error('SiteMap: skipping unrenderable roost shape', e); }
+      // Same rendering as the internal register's own map (SurveyMapPanel) - Clara, 2026-09-08:
+      // "Add to the roost register map the roost circles as in per view on Roost register." A
+      // point-type Roost has no drawn shape of its own (it's located automatically from wherever
+      // its member entrance(s) are - see createRoost's own comment) so it draws as an oversized,
+      // roost-coloured circleMarker instead; line/polygon roosts use their own drawn geometry. The
+      // previous L.geoJSON(g.geometry, ...) call here never actually worked - roost.geometry is
+      // this app's own {type, points:[{lat,lon}]} shape, not GeoJSON, so every shape silently threw
+      // and was swallowed by the catch below.
+      shownGroups.forEach((g) => {
+        try {
+          const color = colorForRoost(g.id);
+          if (g.geometryType === 'point') {
+            const memberPts = (site.roostEntrances || [])
+              .filter((e) => e.roostId === g.id && isFiniteCoord(e.latitude) && isFiniteCoord(e.longitude))
+              .map((e) => [e.latitude, e.longitude]);
+            const center = averageLatLon(memberPts);
+            if (!center) return;
+            L.circleMarker(center, { radius: 16, color, weight: 2, fillColor: color, fillOpacity: 0.45 }).bindTooltip(g.code).addTo(group);
+            bounds.push(center);
+          } else if (g.geometry && g.geometry.points && g.geometry.points.length > 0) {
+            const latlngs = g.geometry.points.filter((p) => isFiniteCoord(p.lat) && isFiniteCoord(p.lon)).map((p) => [p.lat, p.lon]);
+            if (latlngs.length < 2) return;
+            const shape = g.geometry.type === 'polygon'
+              ? L.polygon(latlngs, { color, weight: 2, fillColor: color, fillOpacity: 0.15 })
+              : L.polyline(latlngs, { color, weight: 3 });
+            shape.bindTooltip(g.code).addTo(group);
+            latlngs.forEach((ll) => bounds.push(ll));
+          }
+        } catch (e) {
+          console.error('SiteMap: skipping roost shape with unrenderable geometry', g.id, e);
+        }
       });
     }
     group.addTo(map);
@@ -652,9 +697,13 @@ function ObservationsView({ site, mediaIndex }) {
     (site.surveys || []).forEach((survey) => {
       (survey.locations || []).forEach((loc) => {
         (loc.images || []).forEach((img) => {
-          if (!img.label && (img.emergingRoosts || []).length === 0 && !img.visualSpecies && !img.matchedRecordingId) return;
           const matched = M.matchedRecordingFor(survey, img);
           const species = matchedRecordingSpecies(img, matched) || img.visualSpecies;
+          // A merely sound-matched-but-not-yet-species-confirmed image used to pass this filter too
+          // (via the old matchedRecordingId check) and show up with a blank species pill and no
+          // label - Clara, 2026-09-08: "only show observations with either label or species
+          // assigned (do not show summary images with no activity)."
+          if (!img.label && !species) return;
           const entranceCodes = (img.emergingRoosts || [])
             .map((e) => (site.roostEntrances || []).find((r) => r.id === e.roostEntranceId))
             .filter(Boolean).map((r) => r.code);
