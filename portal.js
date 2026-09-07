@@ -905,7 +905,12 @@ function SurveyInfoView({ site }) {
 
 // ---------------- App shell ----------------
 function App() {
-  const [site, setSite] = useState(null);
+  // A self-building export baked from SurveyReview (see generateClientPortalHtml there) sets this
+  // before portal.js runs, so the JSON-load step below is only ever seen on the hosted
+  // portal.ecologyhive.co.uk, where a client hasn't been handed a preloaded file - Clara,
+  // 2026-09-07: "the outputs folder... has a html page or similar that builds itself as the client
+  // output with preloaded project."
+  const [site, setSite] = useState(() => (window.__PRELOADED_SITE__ ? M.migrateSite(window.__PRELOADED_SITE__) : null));
   const [mediaIndex, setMediaIndex] = useState(null);
   const [tab, setTab] = useState('roost');
 
