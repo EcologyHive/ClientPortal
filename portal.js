@@ -857,73 +857,6 @@ function SoundResultsView({ site, mediaIndex }) {
 
 // ---------------- Outputs (exported clips/reports - anything in the linked folder that isn't a
 // source WIS still or video already shown in Observations) ----------------
-function OutputsView({ site, mediaIndex }) {
-  const usedNames = useMemo(() => {
-    const used = new Set();
-    (site.surveys || []).forEach((survey) => {
-      (survey.locations || []).forEach((loc) => (loc.images || []).forEach((img) => {
-        used.add(img.fileName.toLowerCase());
-      }));
-      // Sound recordings are already surfaced (with a "View sonogram" button) under Sound
-      // analysis - marking them used here too so they don't also show up as an unexplained
-      // "extra" file in Outputs.
-      (survey.soundDetectors || []).forEach((det) => (det.recordings || []).forEach((rec) => {
-        if (rec.fileName) used.add(rec.fileName.toLowerCase());
-      }));
-    });
-    if (mediaIndex) {
-      for (const [name] of mediaIndex.entries()) {
-        if (VIDEO_EXT.test(name)) {
-          // Any video referenced as a WIS still's source video is "used" too, not just the
-          // still itself - matched the same startsWith convention as findVideoHandle.
-          const isSourceVideo = (site.surveys || []).some((survey) => (survey.locations || []).some((loc) =>
-            (loc.images || []).some((img) => img.videoBaseName && name.startsWith(img.videoBaseName.toLowerCase()))));
-          if (isSourceVideo) used.add(name);
-        }
-      }
-    }
-    return used;
-  }, [site, mediaIndex]);
-
-  const outputs = useMemo(() => {
-    if (!mediaIndex) return [];
-    return Array.from(mediaIndex.entries())
-      .filter(([name]) => !usedNames.has(name))
-      .map(([name, handle]) => ({ name, handle }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [mediaIndex, usedNames]);
-
-  const [urls, setUrls] = useState({});
-  async function open(item) {
-    let url = urls[item.name];
-    if (!url) { url = await F.getFileBlobUrl(item.handle); setUrls((u) => ({ ...u, [item.name]: url })); }
-    window.open(url, '_blank');
-  }
-
-  return h('div', { className: 'main' },
-    h('div', { className: 'main-header' },
-      h('div', null,
-        h('div', { className: 'main-title' }, '📤 Outputs'),
-        h('div', { className: 'main-subtitle' }, `${outputs.length} file(s) - exported clips, reports and anything else in the handover folder`)
-      )
-    ),
-    h('div', { className: 'content' },
-      !mediaIndex && h('div', { className: 'empty-state' },
-        h('div', { className: 'empty-title' }, 'No folder linked'),
-        h('div', { className: 'empty-text' }, 'Link your handover folder from the sidebar to see exported clips and reports here.')),
-      mediaIndex && outputs.length === 0 && h('div', { className: 'empty-state' }, h('div', { className: 'empty-title' }, 'Nothing extra found in the linked folder')),
-      mediaIndex && outputs.length > 0 && h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-        outputs.map((item) => h('div', {
-          key: item.name, className: 'card', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px' },
-        },
-          h('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 13 } }, item.name),
-          h('button', { className: 'btn btn-secondary btn-small', onClick: () => open(item) }, 'Open')
-        ))
-      )
-    )
-  );
-}
-
 // ---------------- Survey info (date, weather, sunset, timing, personnel) ----------------
 // survey.personnel only ever holds {surveyorId, role} in the app's own live data - resolving a
 // name normally needs a connection to the shared org-wide surveyor register, which this offline
@@ -984,7 +917,6 @@ function App() {
     ['observations', '📷 Observations'],
     ['sound', '🔊 Sound analysis'],
     ['info', 'ℹ️ Survey info'],
-    ['outputs', '📤 Outputs'],
   ];
   return h('div', { className: 'app-shell' },
     h('div', { className: 'sidebar' },
@@ -1001,8 +933,7 @@ function App() {
     tab === 'roost' && h(RoostRegisterView, { site }),
     tab === 'observations' && h(ObservationsView, { site, mediaIndex }),
     tab === 'sound' && h(SoundResultsView, { site, mediaIndex }),
-    tab === 'info' && h(SurveyInfoView, { site }),
-    tab === 'outputs' && h(OutputsView, { site, mediaIndex })
+    tab === 'info' && h(SurveyInfoView, { site })
   );
 }
 
