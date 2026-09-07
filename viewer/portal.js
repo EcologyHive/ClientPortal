@@ -1292,7 +1292,10 @@ function buildThermalSummaryRows(site, surveys) {
 function personnelRowsFor(surveys) {
   const map = new Map();
   (surveys || []).forEach((survey) => (survey.personnel || []).forEach((p) => {
-    if (!map.has(p.surveyorId)) map.set(p.surveyorId, { Name: p.surveyorName || '(name unresolved)', Role: p.role || '' });
+    if (!map.has(p.surveyorId)) map.set(p.surveyorId, {
+      Name: p.surveyorName || '(name unresolved)', Role: p.role || '',
+      Postnominals: p.surveyorPostnominals || '', Licences: p.surveyorLicences || '', Bio: p.surveyorBio || '',
+    });
   }));
   return Array.from(map.values());
 }
@@ -1319,6 +1322,31 @@ function pillEntry(key, primary, tags) {
 function pillList(entries) {
   if (!entries || entries.length === 0) return h('div', { className: 'card-sub' }, 'Nothing recorded.');
   return h('div', null, entries);
+}
+
+// A note-style entry for records with a free-text body (constraint descriptions/mitigations can run
+// to a paragraph) - Clara, 2026-09-08: "pill for survey constraints is too small for text." A full
+// rounded capsule (pillEntry) reads fine for a handful of short tags but turns into an oversized,
+// oddly-tapered blob once the content is a paragraph; this keeps the short badges pill-shaped in
+// their own header row and gives the free text a normal card to wrap in below.
+// `body` is either a single string or an array of lines (each its own paragraph, e.g. a personnel
+// entry's licences line followed by its bio paragraph) - kept simple rather than a full node so
+// every call site stays plain data.
+function pillNote(key, badges, body) {
+  const cleanBadges = (badges || []).filter((b) => b !== null && b !== undefined && b !== '');
+  const lines = (Array.isArray(body) ? body : [body]).filter((b) => b !== null && b !== undefined && b !== '');
+  return h('div', {
+    key,
+    style: {
+      padding: '10px 16px', borderRadius: 'var(--radius)', background: 'var(--bg-card)',
+      border: '1px solid var(--border)', marginBottom: 8, fontSize: 12.5, lineHeight: 1.5,
+    },
+  },
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, fontWeight: 700, marginBottom: lines.length ? 6 : 0 } },
+      cleanBadges.map((b, i) => h('span', { key: i }, i > 0 ? `· ${b}` : b))
+    ),
+    lines.map((line, i) => h('div', { key: i, style: { color: 'var(--text-muted)', marginTop: i > 0 ? 4 : 0 } }, line))
+  );
 }
 
 function SummaryView({ site }) {
@@ -1363,11 +1391,19 @@ function SummaryView({ site }) {
       // likely to actually need to act on (missed coverage, a limitation to bear in mind) reads
       // better ahead of the who/what-equipment reference sections below it.
       h('div', { className: 'section-title' }, 'Survey constraints'),
-      pillList(buildConstraintRows(surveys).map((r, i) => pillEntry(i, `⚠️ ${r.SurveyDate || '(no date)'}`, [
-        r.AffectedEquipment, r.Description, r.Mitigation && `Mitigation: ${r.Mitigation}`,
-      ]))),
+      pillList(buildConstraintRows(surveys).map((r, i) => pillNote(i,
+        [`⚠️ ${r.SurveyDate || '(no date)'}`, r.AffectedEquipment],
+        [r.Description, r.Mitigation && `Mitigation: ${r.Mitigation}`].filter(Boolean).join('  ')
+      ))),
+      // Includes each surveyor's own licences/bio blurb from the shared Surveyors register, same
+      // credentials line a report would show - Clara, 2026-09-08: "for personnel add the blurb we
+      // have stored in EH." Bio can run to a paragraph, so this is a pillNote (badge header + text
+      // body), same reasoning as Survey constraints just above.
       h('div', { className: 'section-title' }, 'Personnel'),
-      pillList(personnelRowsFor(surveys).map((p, i) => pillEntry(i, `👤 ${p.Name}`, [p.Role]))),
+      pillList(personnelRowsFor(surveys).map((p, i) => pillNote(i,
+        [`👤 ${p.Name}${p.Postnominals ? ' ' + p.Postnominals : ''}`, p.Role],
+        [p.Licences, p.Bio]
+      ))),
       h('div', { className: 'section-title' }, 'Equipment'),
       pillList(buildEquipmentListRows(surveys).map((r, i) => pillEntry(i, `${r.Type === 'Camera location' ? '📷' : '🎤'} ${r.Name || '(unnamed)'}`, [
         r.Type, r.SurveyDate, r.Kit, r.EquipmentUnitId && `Unit ID: ${r.EquipmentUnitId}`,

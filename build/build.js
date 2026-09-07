@@ -32,6 +32,55 @@ async function stripComments(js, label) {
   return result.code;
 }
 
+// Strips comments from every inline <script> in index.html itself (the window.onerror handler, the
+// early <head> theme script, the theme-toggle IIFE) - the VIEWER_SCRIPTS loop above only ever
+// touched the separate data-model.js/files.js/.../portal.js files, so these inline blocks were
+// shipping straight through with every dev comment intact (ChatGPT review via Clara, 2026-09-08:
+// found an unminified internal comment - naming Clara, quoting internal discussion, describing
+// architecture - sitting in the exported HTML). External <script src="..."> tags (the vendor
+// React/ReactDOM/Leaflet references, added later by the CDN-swap steps below) are left alone -
+// this runs on the source template BEFORE those get inlined, so it never re-processes ~700KB of
+// already-minified vendor code.
+async function stripInlineScriptComments(html, label) {
+  const re = /<script((?:\s+[a-zA-Z-]+(?:="[^"]*")?)*)>([\s\S]*?)<\/script>/g;
+  let result = '';
+  let lastIndex = 0;
+  let match;
+  let count = 0;
+  while ((match = re.exec(html))) {
+    const [full, attrs, content] = match;
+    result += html.slice(lastIndex, match.index);
+    if (/\bsrc=/.test(attrs) || content.trim() === '') {
+      result += full;
+    } else {
+      const stripped = await stripComments(content, `${label} inline script #${++count}`);
+      result += `<script${attrs}>${stripped}</script>`;
+    }
+    lastIndex = match.index + full.length;
+  }
+  result += html.slice(lastIndex);
+  return result;
+}
+
+// Same concern as stripInlineScriptComments but for the plain CSS comments in index.html's own
+// <style> blocks (only one exists today - "Same EcologyHive brand tokens..." - but stripped on
+// principle so "no internal comments in the export" is actually true, not just true of <script>
+// blocks). Safe as a plain regex, unlike JS: CSS has no `//`-inside-a-string-literal gotcha.
+function stripStyleComments(html) {
+  return html.replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/g, (full, open, content, close) => (
+    open + content.replace(/\/\*[\s\S]*?\*\//g, '') + close
+  ));
+}
+
+// Dormant background-image rules for Leaflet's default marker icon / layers-control toggle - never
+// actually requested (the viewer only ever uses custom divIcons, never L.Icon.Default or a layers
+// control) but ChatGPT's review flagged them as a residual "could this ever fire a request/produce a
+// missing icon" risk for a build meant to be genuinely self-contained. Stripped rather than embedded
+// as data URIs, since they're dead weight either way.
+function stripDormantLeafletImageRefs(css) {
+  return css.replace(/background-image:url\(images\/[^)]*\);?/g, '');
+}
+
 function fontFaceCss(manifest, urlFor) {
   return manifest
     .map(
@@ -52,22 +101,27 @@ async function main() {
   }
   const fontManifest = JSON.parse(read(path.join(VENDOR_DIR, 'fonts', 'manifest.json')));
 
-  const sourceHtml = read(path.join(VIEWER_DIR, 'index.html'));
+  const rawSourceHtml = read(path.join(VIEWER_DIR, 'index.html'));
   const viewerJs = {};
   for (const name of VIEWER_SCRIPTS) viewerJs[name] = read(path.join(VIEWER_DIR, name));
 
   console.log('Stripping comments from viewer scripts...');
   const strippedJs = {};
   for (const name of VIEWER_SCRIPTS) strippedJs[name] = await stripComments(viewerJs[name], name);
+  const sourceHtml = stripStyleComments(await stripInlineScriptComments(rawSourceHtml, 'index.html'));
 
   // ---------------- dist/hosted/ ----------------
   const hostedDir = path.join(DIST_DIR, 'hosted');
   fs.rmSync(hostedDir, { recursive: true, force: true });
   fs.mkdirSync(path.join(hostedDir, 'vendor', 'fonts'), { recursive: true });
 
-  for (const f of ['react.production.min.js', 'react-dom.production.min.js', 'leaflet.min.js', 'leaflet.min.css']) {
+  for (const f of ['react.production.min.js', 'react-dom.production.min.js', 'leaflet.min.js']) {
     fs.copyFileSync(path.join(VENDOR_DIR, f), path.join(hostedDir, 'vendor', f));
   }
+  fs.writeFileSync(
+    path.join(hostedDir, 'vendor', 'leaflet.min.css'),
+    stripDormantLeafletImageRefs(read(path.join(VENDOR_DIR, 'leaflet.min.css')))
+  );
   const fontFilesUsed = new Set(fontManifest.map((f) => f.fileName));
   for (const fileName of fontFilesUsed) {
     fs.copyFileSync(path.join(VENDOR_DIR, 'fonts', fileName), path.join(hostedDir, 'vendor', 'fonts', fileName));
@@ -115,7 +169,7 @@ async function main() {
 
   // ---------------- dist/offline-template.html ----------------
   let offlineHtml = sourceHtml;
-  const leafletCss = read(path.join(VENDOR_DIR, 'leaflet.min.css'));
+  const leafletCss = stripDormantLeafletImageRefs(read(path.join(VENDOR_DIR, 'leaflet.min.css')));
   offlineHtml = replaceOnce(
     offlineHtml,
     `<!-- VENDOR:leaflet-css - build script replaces this with the pinned local/inlined copy; kept as a
