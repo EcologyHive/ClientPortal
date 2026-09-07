@@ -123,5 +123,36 @@ html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-
 <script src="https://review.ecologyhive.co.uk/wav.js" crossorigin="anonymous"></script>
 <script src="https://review.ecologyhive.co.uk/dsp.js" crossorigin="anonymous"></script>
 <script src="portal.js"></script>
+<script>
+  // Night/Day theme toggle - deliberately plain JS, not part of the React tree, same pattern as
+  // every other EcologyHive app. Placed after portal.js (not solely in <head>, unlike those other
+  // apps) so it can see window.__EXPORT_BRANDING__, which is only set once portal.js's own injected
+  // preload runs (for an offline export) - lets a FIRST-EVER open (nothing saved in localStorage
+  // yet) pick the right default before any toggle choice exists. Clara, 2026-09-08: "for the client
+  // side use the clear theme" (an export defaults to light) "I want theme to be interchangeable in
+  // portal" (freely toggleable everywhere after that, remembered per-device same as the hosted
+  // portal already does via the early <head> script above, which still avoids a flash of the wrong
+  // theme for anyone who already has a saved preference).
+  (function () {
+    function currentTheme() {
+      return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    }
+    function setTheme(t) {
+      document.documentElement.setAttribute('data-theme', t);
+      try { localStorage.setItem('eh-theme', t); } catch (e) {}
+      btn.textContent = t === 'light' ? '\u{1F319}' : '\u{2600}\u{FE0F}';
+      btn.setAttribute('aria-label', t === 'light' ? 'Switch to Night mode' : 'Switch to Day mode');
+    }
+    var saved = null;
+    try { saved = localStorage.getItem('eh-theme'); } catch (e) {}
+    var initial = saved || (window.__EXPORT_BRANDING__ ? 'light' : 'dark');
+    var btn = document.createElement('button');
+    btn.className = 'eh-theme-toggle';
+    btn.type = 'button';
+    btn.onclick = function () { setTheme(currentTheme() === 'light' ? 'dark' : 'light'); };
+    document.body.appendChild(btn);
+    setTheme(initial);
+  })();
+</script>
 </body>
 </html>
