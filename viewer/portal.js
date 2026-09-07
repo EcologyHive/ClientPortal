@@ -245,28 +245,30 @@ function SoundSummaryCard({ detector, progress }) {
 // (same convention the internal app already relies on for WIS/video pairing) works regardless of
 // whatever subfolder layout the handover actually used - PROVIDED filenames are unique across the
 // whole handover. They aren't always: bat detectors commonly reset their own internal file counter
-// per deployment, so the exact same filename (e.g. "27940009.wav") can genuinely exist under more
-// than one detector's own folder within one handover - Clara, 2026-09-08: "it feels like sonogram
-// in client viewer is not showing the right file" (confirmed against a real export - the flat index
-// below used to silently keep whichever copy it found FIRST while walking the folder, which is not
-// necessarily the one that actually belongs to the recording being opened).
+// per deployment, so the exact same filename (e.g. "27940009.wav") can genuinely exist more than
+// once in one handover - the SAME detector redeployed across separate survey visits reuses its own
+// counter too, not just different detectors sharing one - Clara, 2026-09-08 (reported twice, the
+// first fix attempt didn't hold up against her real folder structure): "it feels like sonogram in
+// client viewer is not showing the right file." The flat index used to silently keep whichever copy
+// it found FIRST while walking the folder, which is not necessarily the one that actually belongs
+// to the recording being opened.
 //
-// `byName` now keeps every match per filename (with its immediate parent folder name), not just the
-// first - `flat` is the old first-match Map, kept for images/video where a same-name collision
-// across different cameras is far less likely (WIS/video filenames embed a full date/time) and a
-// full disambiguation pass isn't worth the complexity. Sound recordings go through
-// resolveSoundHandle below instead, which uses the parent folder name to disambiguate.
+// `byName` now keeps every same-named match, not just the first - `flat` is the old first-match Map,
+// kept for images/video where a same-name collision across different cameras is far less likely
+// (WIS/video filenames embed a full date/time) and a full disambiguation pass isn't worth the
+// complexity. Sound recordings go through resolveSoundHandle below instead, which disambiguates by
+// each candidate's own embedded/derived timestamp rather than folder naming.
 const IMAGE_EXT = /\.(jpe?g|png)$/i;
 const VIDEO_EXT = /\.(mp4|mov|avi|mkv)$/i;
 async function indexHandoverFolder(rootHandle, maxDepth) {
-  const byName = new Map(); // lowercased filename -> [{ handle, parentName }, ...]
+  const byName = new Map(); // lowercased filename -> [FileSystemFileHandle, ...]
   async function walk(dirHandle, depth) {
     const subdirs = [];
     for await (const [name, entry] of dirHandle.entries()) {
       if (entry.kind === 'file') {
         const key = name.toLowerCase();
         const list = byName.get(key) || [];
-        list.push({ handle: entry, parentName: dirHandle.name || '' });
+        list.push(entry);
         byName.set(key, list);
       } else if (entry.kind === 'directory') {
         subdirs.push(entry);
@@ -277,23 +279,58 @@ async function indexHandoverFolder(rootHandle, maxDepth) {
   }
   await walk(rootHandle, maxDepth);
   const flat = new Map();
-  byName.forEach((list, key) => flat.set(key, list[0].handle));
+  byName.forEach((list, key) => flat.set(key, list[0]));
   return { flat, byName };
 }
 
-// Picks the right physical file among same-named candidates for a sound recording, using the
-// recording's own detector name as a hint - see indexHandoverFolder's own comment for why this is
-// necessary. Falls back to the first candidate (old behaviour) when there's no collision, or when
-// none of the candidates' parent folder names mention the detector (a handover that doesn't mirror
-// SurveyReview's own per-detector sound folders at all).
-function resolveSoundHandle(mediaIndex, fileName, detectorName) {
-  if (!mediaIndex || !fileName) return null;
-  const candidates = mediaIndex.byName.get(fileName.toLowerCase());
+// Same priority SurveyReview itself uses at import time to set recording.dateTimeIso in the first
+// place (see app.js's bestWavMeta comment there), minus the BatLogger XML sidecar step - a
+// sidecar's own filename collides across detectors/nights exactly the same way its WAV does, so it
+// can't help disambiguate which physical file a given candidate even is. The WAV's own embedded
+// GUANO timestamp first, then its device-written "_YYYYMMDD_HHMMSS" filename convention, then
+// (least reliable) the file's own filesystem lastModified.
+async function candidateTimestampMs(handle) {
+  try {
+    const file = await handle.getFile();
+    const parsed = Wav.parseWav(await file.arrayBuffer(), { skipSamples: true });
+    if (parsed.guano && parsed.guano.timestamp) {
+      const d = new Date(parsed.guano.timestamp);
+      if (!isNaN(d.getTime())) return d.getTime();
+    }
+    const fromName = Wav.parseTimestampFromFilename(file.name);
+    if (fromName) return fromName.getTime();
+    return file.lastModified;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Picks the right physical file among same-named candidates for a sound recording - a first attempt
+// at this used the immediate parent folder name as a detector-name hint, but that broke against
+// Clara's real handover structure (2026-09-08, "It feels like sonogram in client viewer is not
+// showing the right file" - persisted even after that fix): the WAV's immediate parent is a
+// BatLogger session folder like "BL20260716", not a detector-named folder, and the SAME detector
+// redeployed across separate survey visits reuses its own file counter too, so a collision isn't
+// only ever cross-detector. This instead reads each candidate's own embedded/derived timestamp
+// (candidateTimestampMs) and picks whichever is closest to this recording's own dateTimeIso - the
+// one piece of ground truth that's already correct in the exported site data regardless of folder
+// layout, since SurveyReview derived it from the same WAV content at import time.
+async function resolveSoundHandle(mediaIndex, recording) {
+  if (!mediaIndex || !recording || !recording.fileName) return null;
+  const candidates = mediaIndex.byName.get(recording.fileName.toLowerCase());
   if (!candidates || candidates.length === 0) return null;
-  if (candidates.length === 1 || !detectorName) return candidates[0].handle;
-  const lowerDet = detectorName.toLowerCase();
-  const match = candidates.find((c) => c.parentName && c.parentName.toLowerCase().includes(lowerDet));
-  return (match || candidates[0]).handle;
+  if (candidates.length === 1) return candidates[0];
+  const targetMs = recording.dateTimeIso ? new Date(recording.dateTimeIso).getTime() : NaN;
+  if (isNaN(targetMs)) return candidates[0];
+  let best = candidates[0];
+  let bestDiff = Infinity;
+  for (const handle of candidates) {
+    const ts = await candidateTimestampMs(handle);
+    if (ts == null) continue;
+    const diff = Math.abs(ts - targetMs);
+    if (diff < bestDiff) { bestDiff = diff; best = handle; }
+  }
+  return best;
 }
 
 // ---------------- Zoomable WIS still (copied from SurveyReview's QA review - identical mechanics,
@@ -927,7 +964,7 @@ function ObservationsView({ site, mediaIndex }) {
                       cursor: row.matched ? 'pointer' : 'default',
                     },
                     title: row.matched ? 'View sonogram' : 'No matched sound recording',
-                    onClick: row.matched ? () => setSonogramFor({ recording: row.matched.recording, detectorName: row.matched.detector.name }) : undefined,
+                    onClick: row.matched ? () => setSonogramFor(row.matched.recording) : undefined,
                   }, row.species)),
                 h('td', { style: SUMMARY_TD_STYLE },
                   row.image.videoBaseName && h('button', {
@@ -954,8 +991,8 @@ function ObservationsView({ site, mediaIndex }) {
       onClose: () => setOpenImageFor(null),
     }),
     sonogramFor && h(SonogramPopup, {
-      recording: sonogramFor.recording,
-      audioHandle: mediaIndex ? resolveSoundHandle(mediaIndex, sonogramFor.recording.fileName, sonogramFor.detectorName) : null,
+      recording: sonogramFor,
+      mediaIndex,
       onClose: () => setSonogramFor(null),
     })
   );
@@ -1001,27 +1038,32 @@ function niceStep(range, targetTicks) {
 
 const SONO_WIDTH = 900, SONO_HEIGHT = 300, SONO_AXIS_LEFT = 46, SONO_AXIS_BOTTOM = 20;
 
-function SonogramPopup({ recording, audioHandle, onClose }) {
+function SonogramPopup({ recording, mediaIndex, onClose }) {
   const canvasRef = useRef(null);
-  const [status, setStatus] = useState('loading'); // loading | ready | error | missing
+  const [status, setStatus] = useState('loading'); // loading | error | missing | ready
   const [error, setError] = useState(null);
   const [specInfo, setSpecInfo] = useState(null); // { durationSec, sampleRate } | null - drives the axes
   const [hover, setHover] = useState(null); // { x, y, freqKHz, timeMs } | null
-  // Bumped by the Reload button below to force a genuinely fresh read - Clara, 2026-09-08: "went
-  // back to sound and every screen was showing the same image with noise... i just re-linked the
-  // sound folder and it refreshed to the right one (funny this behaviour showed in portal also) -
-  // we need to fix that - force it to refresh a true sonogram." SurveyReview's own fix for this
-  // re-scans its whole sound folder fresh on every recording switch (it holds a live directory
-  // handle to do that with) - this popup only ever gets an already-resolved audioHandle from the
-  // portal's one-time media index, with no folder to re-scan from, so an explicit reload button is
-  // the available escape hatch here.
+  // Bumped by the Reload button below to force a genuinely fresh resolve+read - Clara, 2026-09-08:
+  // "went back to sound and every screen was showing the same image with noise... i just re-linked
+  // the sound folder and it refreshed to the right one" - kept as an escape hatch even now that
+  // resolveSoundHandle disambiguates by timestamp rather than just grabbing whatever the index
+  // happened to resolve first.
   const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
-    if (!audioHandle) { setStatus('missing'); return; }
     setStatus('loading');
     (async () => {
       try {
+        // Bat detectors reset their own file counter per deployment, so the same filename can exist
+        // more than once in a handover (same OR different detector, across separate survey nights) -
+        // resolveSoundHandle picks the physical file whose own embedded/derived timestamp is closest
+        // to this recording's dateTimeIso, rather than assuming the media index only ever found one
+        // candidate. See its own comment for the full story (Clara, 2026-09-08, twice: "sonogram in
+        // client viewer is not showing the right file").
+        const audioHandle = await resolveSoundHandle(mediaIndex, recording);
+        if (cancelled) return;
+        if (!audioHandle) { setStatus('missing'); return; }
         const file = await audioHandle.getFile();
         const buf = await file.arrayBuffer();
         const parsed = Wav.parseWav(buf);
@@ -1045,7 +1087,7 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [audioHandle, reloadKey]);
+  }, [recording, mediaIndex, reloadKey]);
 
   function pixelToFreq(y) { const nyquist = specInfo.sampleRate / 2; return Math.max(0, Math.min(nyquist, nyquist * (1 - y / SONO_HEIGHT))); }
   function pixelToTime(x) { return Math.max(0, (x / SONO_WIDTH) * specInfo.durationSec); }
@@ -1148,7 +1190,7 @@ function DetectorRecordingsSection({ detector, onOpenSonogram }) {
             h('td', { style: SUMMARY_TD_STYLE }, rec.fileName),
             h('td', { style: SUMMARY_TD_STYLE }, recordingSpeciesLabel(rec.analysis) || '—'),
             h('td', { style: SUMMARY_TD_STYLE },
-              h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => onOpenSonogram({ recording: rec, detectorName: detector.name }) }, '🔬 Sonogram'))
+              h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => onOpenSonogram(rec) }, '🔬 Sonogram'))
           )))
         )
       )
@@ -1219,8 +1261,8 @@ function SoundResultsView({ site, mediaIndex }) {
       survey && mode === 'map' && h(SpeciesLocationMap, { speciesList: stats.speciesList })
     ),
     sonogramFor && h(SonogramPopup, {
-      recording: sonogramFor.recording,
-      audioHandle: mediaIndex ? resolveSoundHandle(mediaIndex, sonogramFor.recording.fileName, sonogramFor.detectorName) : null,
+      recording: sonogramFor,
+      mediaIndex,
       onClose: () => setSonogramFor(null),
     })
   );
