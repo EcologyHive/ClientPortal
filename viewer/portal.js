@@ -852,7 +852,7 @@ function ObservationsView({ site, mediaIndex }) {
             .filter(Boolean).map((r) => r.code);
           const labelObj = img.label ? M.findLabel(site, img.label) : null;
           const labelName = labelObj ? labelObj.name : (img.label || '');
-          out.push({ survey, location: loc, image: img, species, entranceCodes, matched, labelName });
+          out.push({ survey, location: loc, image: img, species, entranceCodes, matched, labelName, clipCount: (img.clipRanges || []).length });
         });
       });
     });
@@ -899,7 +899,15 @@ function ObservationsView({ site, mediaIndex }) {
                     onClick: row.matched ? () => setSonogramFor(row.matched.recording) : undefined,
                   }, row.species)),
                 h('td', { style: SUMMARY_TD_STYLE },
-                  row.image.videoBaseName && h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => setOpenVideoFor(row.image) }, '🎬 Video'))
+                  row.image.videoBaseName && h('button', {
+                    // Clips are the highlight of a handover (Clara, 2026-09-08) - a plain "Video"
+                    // button gave no hint which rows actually have one, so a client had to open
+                    // every video to find out. Highlighted (accent-filled) and labelled with the
+                    // count whenever this image has one or more clipRanges.
+                    className: 'btn btn-tiny' + (row.clipCount > 0 ? ' btn-primary' : ' btn-secondary'),
+                    onClick: () => setOpenVideoFor(row.image),
+                    title: row.clipCount > 0 ? `${row.clipCount} highlighted clip(s) marked in this video` : 'Open video',
+                  }, row.clipCount > 0 ? `🎬 🔁 Video (${row.clipCount} clip${row.clipCount > 1 ? 's' : ''})` : '🎬 Video'))
               )))
             )
           )
