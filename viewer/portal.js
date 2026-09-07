@@ -243,17 +243,31 @@ function SoundSummaryCard({ detector, progress }) {
 // links - a client's handover folder isn't maintained as an ongoing per-camera structure the way
 // Clara's own survey is, it's a one-off drop of everything together. Matching purely by filename
 // (same convention the internal app already relies on for WIS/video pairing) works regardless of
-// whatever subfolder layout the handover actually used.
+// whatever subfolder layout the handover actually used - PROVIDED filenames are unique across the
+// whole handover. They aren't always: bat detectors commonly reset their own internal file counter
+// per deployment, so the exact same filename (e.g. "27940009.wav") can genuinely exist under more
+// than one detector's own folder within one handover - Clara, 2026-09-08: "it feels like sonogram
+// in client viewer is not showing the right file" (confirmed against a real export - the flat index
+// below used to silently keep whichever copy it found FIRST while walking the folder, which is not
+// necessarily the one that actually belongs to the recording being opened).
+//
+// `byName` now keeps every match per filename (with its immediate parent folder name), not just the
+// first - `flat` is the old first-match Map, kept for images/video where a same-name collision
+// across different cameras is far less likely (WIS/video filenames embed a full date/time) and a
+// full disambiguation pass isn't worth the complexity. Sound recordings go through
+// resolveSoundHandle below instead, which uses the parent folder name to disambiguate.
 const IMAGE_EXT = /\.(jpe?g|png)$/i;
 const VIDEO_EXT = /\.(mp4|mov|avi|mkv)$/i;
 async function indexHandoverFolder(rootHandle, maxDepth) {
-  const index = new Map(); // lowercased filename -> FileSystemFileHandle
+  const byName = new Map(); // lowercased filename -> [{ handle, parentName }, ...]
   async function walk(dirHandle, depth) {
     const subdirs = [];
     for await (const [name, entry] of dirHandle.entries()) {
       if (entry.kind === 'file') {
         const key = name.toLowerCase();
-        if (!index.has(key)) index.set(key, entry);
+        const list = byName.get(key) || [];
+        list.push({ handle: entry, parentName: dirHandle.name || '' });
+        byName.set(key, list);
       } else if (entry.kind === 'directory') {
         subdirs.push(entry);
       }
@@ -262,7 +276,24 @@ async function indexHandoverFolder(rootHandle, maxDepth) {
     for (const sub of subdirs) await walk(sub, depth - 1);
   }
   await walk(rootHandle, maxDepth);
-  return index;
+  const flat = new Map();
+  byName.forEach((list, key) => flat.set(key, list[0].handle));
+  return { flat, byName };
+}
+
+// Picks the right physical file among same-named candidates for a sound recording, using the
+// recording's own detector name as a hint - see indexHandoverFolder's own comment for why this is
+// necessary. Falls back to the first candidate (old behaviour) when there's no collision, or when
+// none of the candidates' parent folder names mention the detector (a handover that doesn't mirror
+// SurveyReview's own per-detector sound folders at all).
+function resolveSoundHandle(mediaIndex, fileName, detectorName) {
+  if (!mediaIndex || !fileName) return null;
+  const candidates = mediaIndex.byName.get(fileName.toLowerCase());
+  if (!candidates || candidates.length === 0) return null;
+  if (candidates.length === 1 || !detectorName) return candidates[0].handle;
+  const lowerDet = detectorName.toLowerCase();
+  const match = candidates.find((c) => c.parentName && c.parentName.toLowerCase().includes(lowerDet));
+  return (match || candidates[0]).handle;
 }
 
 // ---------------- Zoomable WIS still (copied from SurveyReview's QA review - identical mechanics,
@@ -896,7 +927,7 @@ function ObservationsView({ site, mediaIndex }) {
                       cursor: row.matched ? 'pointer' : 'default',
                     },
                     title: row.matched ? 'View sonogram' : 'No matched sound recording',
-                    onClick: row.matched ? () => setSonogramFor(row.matched.recording) : undefined,
+                    onClick: row.matched ? () => setSonogramFor({ recording: row.matched.recording, detectorName: row.matched.detector.name }) : undefined,
                   }, row.species)),
                 h('td', { style: SUMMARY_TD_STYLE },
                   row.image.videoBaseName && h('button', {
@@ -919,12 +950,12 @@ function ObservationsView({ site, mediaIndex }) {
     }),
     openImageFor && h(WisImagePopup, {
       image: openImageFor,
-      imageHandle: mediaIndex ? mediaIndex.get((openImageFor.fileName || '').toLowerCase()) : null,
+      imageHandle: mediaIndex ? mediaIndex.flat.get((openImageFor.fileName || '').toLowerCase()) : null,
       onClose: () => setOpenImageFor(null),
     }),
     sonogramFor && h(SonogramPopup, {
-      recording: sonogramFor,
-      audioHandle: mediaIndex ? mediaIndex.get((sonogramFor.fileName || '').toLowerCase()) : null,
+      recording: sonogramFor.recording,
+      audioHandle: mediaIndex ? resolveSoundHandle(mediaIndex, sonogramFor.recording.fileName, sonogramFor.detectorName) : null,
       onClose: () => setSonogramFor(null),
     })
   );
@@ -932,7 +963,7 @@ function ObservationsView({ site, mediaIndex }) {
 function findVideoHandle(mediaIndex, videoBaseName) {
   if (!videoBaseName) return null;
   const lower = videoBaseName.toLowerCase();
-  for (const [name, handle] of mediaIndex.entries()) {
+  for (const [name, handle] of mediaIndex.flat.entries()) {
     if (VIDEO_EXT.test(name) && name.startsWith(lower)) return handle;
   }
   return null;
@@ -1117,7 +1148,7 @@ function DetectorRecordingsSection({ detector, onOpenSonogram }) {
             h('td', { style: SUMMARY_TD_STYLE }, rec.fileName),
             h('td', { style: SUMMARY_TD_STYLE }, recordingSpeciesLabel(rec.analysis) || '—'),
             h('td', { style: SUMMARY_TD_STYLE },
-              h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => onOpenSonogram(rec) }, '🔬 Sonogram'))
+              h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => onOpenSonogram({ recording: rec, detectorName: detector.name }) }, '🔬 Sonogram'))
           )))
         )
       )
@@ -1188,8 +1219,8 @@ function SoundResultsView({ site, mediaIndex }) {
       survey && mode === 'map' && h(SpeciesLocationMap, { speciesList: stats.speciesList })
     ),
     sonogramFor && h(SonogramPopup, {
-      recording: sonogramFor,
-      audioHandle: mediaIndex ? mediaIndex.get((sonogramFor.fileName || '').toLowerCase()) : null,
+      recording: sonogramFor.recording,
+      audioHandle: mediaIndex ? resolveSoundHandle(mediaIndex, sonogramFor.recording.fileName, sonogramFor.detectorName) : null,
       onClose: () => setSonogramFor(null),
     })
   );
@@ -1470,7 +1501,7 @@ function App() {
   const [tab, setTab] = useState('summary');
 
   if (!site) return h(LoadSiteScreen, { onLoaded: setSite });
-  if (mediaIndex === null) return h(LinkMediaScreen, { onLinked: setMediaIndex, onSkip: () => setMediaIndex(new Map()) });
+  if (mediaIndex === null) return h(LinkMediaScreen, { onLinked: setMediaIndex, onSkip: () => setMediaIndex({ flat: new Map(), byName: new Map() }) });
 
   const tabs = [
     ['summary', '📊 Summary'],
