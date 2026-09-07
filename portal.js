@@ -1201,6 +1201,12 @@ function App() {
         tabs.map(([k, label]) => h('div', {
           key: k, className: 'tree-node' + (tab === k ? ' tree-node-active' : ''), onClick: () => setTab(k),
         }, label))
+      ),
+      // Only on a branded (offline-exported) copy - the hosted portal.ecologyhive.co.uk doesn't
+      // need to credit itself. Clara, 2026-09-08: "I want to add to the client side of portal (AE
+      // branding) a credit sentence to EcologyHive (r)."
+      branding && h('div', { style: { marginTop: 'auto', padding: '12px 16px', fontSize: 11, color: 'var(--text-faint)', borderTop: '1px solid var(--border)' } },
+        'Powered by EcologyHive®'
       )
     ),
     tab === 'summary' && h(SummaryView, { site }),
