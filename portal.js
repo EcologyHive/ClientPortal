@@ -745,10 +745,33 @@ function findVideoHandle(mediaIndex, videoBaseName) {
 // a brief (sub-second) main-thread block opening one sonogram at a time - not paging rapidly
 // through hundreds of them, the scenario that motivated the worker internally - is an acceptable
 // trade rather than duplicating dsp.js/dsp-worker.js locally just to fix the relative path.
+// Same axis/hover convention as SurveyReview's own analyst-facing Sonogram component (freqToPixelY/
+// niceStep are copied verbatim from there) - Clara, 2026-09-08: "we need to add scales (x and y)
+// and when hovering show the frequency (same behaviour as in analysis tool)... this taken to the
+// client handover obvs." No zoom/drag-to-measure here though - those are analyst editing tools,
+// this popup is read-only for a client, so it's always the whole recording at a fixed scale.
+function freqToPixelY(f, sampleRate, height) {
+  const nyquist = sampleRate / 2;
+  return height * (1 - f / nyquist);
+}
+// Picks a "nice" round tick spacing (1/2/5 x10^n) that gives roughly targetTicks divisions.
+function niceStep(range, targetTicks) {
+  if (!(range > 0)) return 1;
+  const raw = range / targetTicks;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+  return step * mag;
+}
+
+const SONO_WIDTH = 900, SONO_HEIGHT = 300, SONO_AXIS_LEFT = 46, SONO_AXIS_BOTTOM = 20;
+
 function SonogramPopup({ recording, audioHandle, onClose }) {
   const canvasRef = useRef(null);
   const [status, setStatus] = useState('loading'); // loading | ready | error | missing
   const [error, setError] = useState(null);
+  const [specInfo, setSpecInfo] = useState(null); // { durationSec, sampleRate } | null - drives the axes
+  const [hover, setHover] = useState(null); // { x, y, freqKHz, timeMs } | null
   useEffect(() => {
     let cancelled = false;
     if (!audioHandle) { setStatus('missing'); return; }
@@ -767,11 +790,11 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
         off.width = img.width; off.height = img.height;
         off.getContext('2d').putImageData(img, 0, 0);
         const canvas = canvasRef.current;
-        canvas.width = 900; canvas.height = 300;
+        canvas.width = SONO_WIDTH; canvas.height = SONO_HEIGHT;
         const ctx = canvas.getContext('2d');
         ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(off, 0, 0, 900, 300);
-        if (!cancelled) setStatus('ready');
+        ctx.drawImage(off, 0, 0, SONO_WIDTH, SONO_HEIGHT);
+        if (!cancelled) { setSpecInfo({ durationSec: spec.durationSec, sampleRate: parsed.sampleRate }); setStatus('ready'); }
       } catch (e) {
         if (!cancelled) { setError(e && e.message || String(e)); setStatus('error'); }
       }
@@ -779,11 +802,69 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
     return () => { cancelled = true; };
   }, [audioHandle]);
 
+  function pixelToFreq(y) { const nyquist = specInfo.sampleRate / 2; return Math.max(0, Math.min(nyquist, nyquist * (1 - y / SONO_HEIGHT))); }
+  function pixelToTime(x) { return Math.max(0, (x / SONO_WIDTH) * specInfo.durationSec); }
+  function localXY(e) {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = SONO_WIDTH / rect.width, scaleY = SONO_HEIGHT / rect.height;
+    return { x: Math.max(0, Math.min(SONO_WIDTH, (e.clientX - rect.left) * scaleX)), y: Math.max(0, Math.min(SONO_HEIGHT, (e.clientY - rect.top) * scaleY)) };
+  }
+  function onMouseMove(e) {
+    const p = localXY(e);
+    setHover({ x: p.x, y: p.y, freqKHz: pixelToFreq(p.y) / 1000, timeMs: pixelToTime(p.x) * 1000 });
+  }
+
+  let freqTicks = [], timeTicks = [];
+  if (specInfo) {
+    const nyquistKHz = specInfo.sampleRate / 2 / 1000;
+    const freqStep = niceStep(nyquistKHz, 6);
+    for (let v = 0; v <= nyquistKHz + 0.001; v += freqStep) freqTicks.push(Math.round(v));
+    const durationMs = specInfo.durationSec * 1000;
+    const timeStep = niceStep(durationMs, 6);
+    for (let v = 0; v <= durationMs + 0.001; v += timeStep) timeTicks.push(Math.round(v));
+  }
+
   return h(Modal, { title: `Sonogram — ${recording.fileName}`, onClose, wide: true },
     status === 'missing' && h('div', { className: 'warning-banner' }, 'No matching sound file found in the linked folder.'),
     status === 'loading' && h('div', { className: 'card-sub' }, 'Decoding and rendering…'),
     status === 'error' && h('div', { className: 'warning-banner' }, error),
-    h('canvas', { ref: canvasRef, style: { width: '100%', display: status === 'ready' ? 'block' : 'none', background: '#0a0c0e', borderRadius: 'var(--radius)' } }),
+    // The canvas itself always mounts (just hidden until ready) rather than being conditionally
+    // rendered on status - the load effect needs canvasRef.current available the moment it resolves,
+    // and status only flips to 'ready' AFTER that same effect has already drawn into it.
+    h('div', { style: { display: status === 'ready' ? 'flex' : 'none', flexDirection: 'column', width: SONO_WIDTH + SONO_AXIS_LEFT, maxWidth: '100%', overflowX: 'auto' } },
+      h('div', { style: { display: 'flex' } },
+        h('div', { style: { width: SONO_AXIS_LEFT, position: 'relative', height: SONO_HEIGHT, flexShrink: 0 } },
+          specInfo && freqTicks.map((kHz) => h('div', {
+            key: kHz, style: { position: 'absolute', right: 6, top: freqToPixelY(kHz * 1000, specInfo.sampleRate, SONO_HEIGHT) - 6, fontSize: 10, color: 'var(--text-faint)', fontFamily: 'var(--font-mono)' },
+          }, kHz))
+        ),
+        h('div', { style: { position: 'relative', width: SONO_WIDTH, flexShrink: 0 } },
+          h('canvas', {
+            ref: canvasRef, style: { width: SONO_WIDTH, height: SONO_HEIGHT, display: 'block', cursor: 'crosshair', borderRadius: 'var(--radius) var(--radius) 0 0', background: '#0a0c0e' },
+            onMouseMove, onMouseLeave: () => setHover(null),
+          }),
+          hover && h(React.Fragment, null,
+            h('div', { style: { position: 'absolute', left: hover.x, top: 0, height: SONO_HEIGHT, borderLeft: '1px dashed rgba(255,255,255,0.35)', pointerEvents: 'none' } }),
+            h('div', { style: { position: 'absolute', left: 0, top: hover.y, width: SONO_WIDTH, borderTop: '1px dashed rgba(255,255,255,0.35)', pointerEvents: 'none' } }),
+            h('div', {
+              style: {
+                position: 'absolute', left: Math.min(hover.x + 8, SONO_WIDTH - 110), top: Math.max(0, hover.y - 22),
+                background: 'rgba(10,12,14,0.9)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 6px',
+                fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text)', pointerEvents: 'none', whiteSpace: 'nowrap',
+              },
+            }, `${hover.freqKHz.toFixed(1)} kHz, ${hover.timeMs.toFixed(1)} ms`)
+          )
+        )
+      ),
+      h('div', { style: { display: 'flex' } },
+        h('div', { style: { width: SONO_AXIS_LEFT, flexShrink: 0 } }),
+        h('div', { style: { position: 'relative', width: SONO_WIDTH, height: SONO_AXIS_BOTTOM, flexShrink: 0 } },
+          specInfo && timeTicks.map((ms) => h('div', {
+            key: ms, style: { position: 'absolute', left: (ms / (specInfo.durationSec * 1000)) * SONO_WIDTH - 14, top: 2, fontSize: 10, color: 'var(--text-faint)', fontFamily: 'var(--font-mono)', width: 30, textAlign: 'center' },
+          }, ms))
+        )
+      )
+    ),
     h('div', { className: 'modal-actions' }, h('button', { className: 'btn btn-secondary', onClick: onClose }, 'Close'))
   );
 }
