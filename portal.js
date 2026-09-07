@@ -857,48 +857,198 @@ function SoundResultsView({ site, mediaIndex }) {
 
 // ---------------- Outputs (exported clips/reports - anything in the linked folder that isn't a
 // source WIS still or video already shown in Observations) ----------------
-// ---------------- Survey info (date, weather, sunset, timing, personnel) ----------------
-// survey.personnel only ever holds {surveyorId, role} in the app's own live data - resolving a
-// name normally needs a connection to the shared org-wide surveyor register, which this offline
-// portal deliberately doesn't have. exportSiteToFile now also bakes a `surveyorName` onto each
-// entry at export time (the one place that IS online), so this falls back to "(name unresolved -
-// re-export from a newer version of SurveyReview)" only for a JSON exported before that existed.
-function SurveyInfoView({ site }) {
+// ---------------- Summary (site info, personnel, equipment, survey visits, result summaries) ----------------
+// Replaces the old, thinner "Survey info" tab - Clara, 2026-09-07: "what i wanted is the same as
+// portal but with a summary site info page looking exactly like [the AE-branded report] plus the
+// other sections on the survey data viewer... order will be summary/survey info - roost register -
+// observations - sound analysis." This tab uses the portal's own normal styling regardless of
+// export branding (SUMMARY_TH_STYLE/card etc, same as every other tab) - only the sidebar
+// logo/accent colours change for a branded offline export (see the __EXPORT_BRANDING__ block near
+// the top of this file); the content layout itself doesn't change per company.
+//
+// survey.personnel only ever holds {surveyorId, role} in the app's own live data - resolving a name
+// normally needs a connection to the shared org-wide surveyor register, which this offline portal
+// deliberately doesn't have. SurveyReview's exportSiteToFile bakes a `surveyorName` onto each entry
+// at export time (the one place that IS online), so a missing name here only ever means the JSON
+// was exported before that existed.
+function buildEquipmentListRows(surveys) {
+  const rows = [];
+  (surveys || []).forEach((survey) => {
+    (survey.locations || []).forEach((loc) => {
+      rows.push({
+        SurveyDate: survey.surveyDate || '', Type: 'Camera location', Name: loc.name || '',
+        EquipmentUnitId: loc.equipmentUnitId || '', Kit: loc.kit || '',
+        Latitude: loc.latitude != null ? loc.latitude : '', Longitude: loc.longitude != null ? loc.longitude : '',
+      });
+    });
+    (survey.soundDetectors || []).forEach((det) => {
+      rows.push({
+        SurveyDate: survey.surveyDate || '', Type: 'Sound detector', Name: det.name || '',
+        EquipmentUnitId: det.equipmentUnitId || '', Kit: det.kit || '',
+        Latitude: det.latitude != null ? det.latitude : '', Longitude: det.longitude != null ? det.longitude : '',
+      });
+    });
+  });
+  return rows;
+}
+
+function buildSurveyVisitRows(surveys) {
+  return (surveys || []).map((survey) => {
+    const equipment = [];
+    (survey.locations || []).forEach((loc) => equipment.push(`Camera/location: ${loc.name || 'Unnamed location'}`));
+    (survey.soundDetectors || []).forEach((det) => equipment.push(`Sound detector: ${det.name || 'Unnamed detector'}`));
+    const personnel = (survey.personnel || []).map((p) =>
+      `${p.surveyorName || '(name unresolved)'}${p.role ? ` (${p.role})` : ''}`);
+    return {
+      SurveyDate: survey.surveyDate || '', Weather: survey.weather || '', Sunset: survey.sunset || '',
+      SurveyStart: survey.surveyStart || '', SurveyEnd: survey.surveyEnd || '',
+      EquipmentUsed: equipment.join('; '), SitePersonnel: personnel.join('; '),
+    };
+  });
+}
+
+function buildConstraintRows(surveys) {
+  const rows = [];
+  (surveys || []).forEach((survey) => {
+    (survey.constraints || []).forEach((c) => {
+      let affected = 'Whole survey';
+      if (c.affectedKind === 'location') {
+        const loc = (survey.locations || []).find((l) => l.id === c.affectedId);
+        affected = loc ? loc.name || '(unnamed location)' : '(deleted location)';
+      } else if (c.affectedKind === 'soundDetector') {
+        const det = (survey.soundDetectors || []).find((d) => d.id === c.affectedId);
+        affected = det ? det.name || '(unnamed detector)' : '(deleted detector)';
+      }
+      rows.push({ SurveyDate: survey.surveyDate || '', AffectedEquipment: affected, Description: c.description || '', Mitigation: c.mitigation || '' });
+    });
+  });
+  return rows;
+}
+
+function buildAcousticSummaryRows(surveys) {
+  const rows = [];
+  (surveys || []).forEach((survey) => {
+    (survey.soundDetectors || []).forEach((det) => {
+      const summary = M.soundSummary(det);
+      if (summary.speciesList.length === 0) return;
+      summary.speciesList.forEach((s) => {
+        rows.push({
+          SurveyDate: survey.surveyDate || '', Detector: det.name || '', Species: s.species,
+          Passes: s.passCount, PassesPerHour: summary.spanHours ? (s.passCount / summary.spanHours).toFixed(2) : '',
+          Bouts: s.boutCount, BoutsPerHour: summary.spanHours ? (s.boutCount / summary.spanHours).toFixed(2) : '',
+        });
+      });
+    });
+  });
+  return rows;
+}
+
+// One row per Location - "how much thermal coverage, what did it show" - aggregated up from every
+// image the same way SurveyReview's own equivalent builder does (see its own comment there).
+function buildThermalSummaryRows(site, surveys) {
+  const rows = [];
+  (surveys || []).forEach((survey) => {
+    (survey.locations || []).forEach((loc) => {
+      const images = loc.images || [];
+      const labelCounts = {};
+      const species = new Set();
+      let roostEmergence = false;
+      images.forEach((img) => {
+        if (img.label) {
+          const labelObj = M.findLabel(site, img.label);
+          const name = labelObj ? labelObj.name : img.label;
+          labelCounts[name] = (labelCounts[name] || 0) + 1;
+        }
+        const matched = M.matchedRecordingFor(survey, img);
+        const sp = matchedRecordingSpecies(img, matched) || img.visualSpecies;
+        if (sp) species.add(sp);
+        if ((img.emergingRoosts || []).some((e) => e.countsToward !== false)) roostEmergence = true;
+      });
+      rows.push({
+        SurveyDate: survey.surveyDate || '', Location: loc.name || '(unnamed)', ImagesReviewed: images.length,
+        LabelBreakdown: Object.entries(labelCounts).map(([name, count]) => `${name}: ${count}`).join('; ') || '(none labelled)',
+        SpeciesIdentified: species.size ? Array.from(species).join(', ') : 'None identified',
+        RoostEmergenceRecorded: roostEmergence ? 'Yes' : 'None recorded',
+      });
+    });
+  });
+  return rows;
+}
+
+function personnelRowsFor(surveys) {
+  const map = new Map();
+  (surveys || []).forEach((survey) => (survey.personnel || []).forEach((p) => {
+    if (!map.has(p.surveyorId)) map.set(p.surveyorId, { Name: p.surveyorName || '(name unresolved)', Role: p.role || '' });
+  }));
+  return Array.from(map.values());
+}
+
+function summaryTable(rows, columns) {
+  if (!rows || rows.length === 0) return h('div', { className: 'card-sub' }, 'Nothing recorded.');
+  return h('div', { style: { overflowX: 'auto' } },
+    h('table', { style: { borderCollapse: 'collapse', width: '100%' } },
+      h('thead', null, h('tr', null, columns.map((c) => h('th', { key: c.key, style: SUMMARY_TH_STYLE }, c.header)))),
+      h('tbody', null, rows.map((row, i) => h('tr', { key: i }, columns.map((c) => h('td', { key: c.key, style: SUMMARY_TD_STYLE }, row[c.key])))))
+    )
+  );
+}
+
+function SummaryView({ site }) {
   const surveys = site.surveys || [];
+  const dates = surveys.map((s) => s.surveyDate).filter(Boolean).sort();
+  const dateRange = dates.length === 0 ? '—' : dates.length === 1 ? dates[0] : `${dates[0]} to ${dates[dates.length - 1]} (${dates.length} visits)`;
+  const locationCount = surveys.reduce((n, s) => n + (s.locations || []).length, 0);
+  const detectorCount = surveys.reduce((n, s) => n + (s.soundDetectors || []).length, 0);
+
+  const infoRows = [
+    ['Site', site.siteName || '(untitled site)'],
+    ['Client', site.client || '—'],
+    site.projectRef && ['Project reference', site.projectRef],
+    site.treesSurveyed && ['Trees / targets surveyed', site.treesSurveyed],
+    ['Survey dates', dateRange],
+    ['Equipment deployed', `${locationCount} thermal camera location(s), ${detectorCount} sound detector(s)`],
+    site.preparedBy && ['Prepared by', site.preparedBy],
+  ].filter(Boolean);
+
   return h('div', { className: 'main' },
     h('div', { className: 'main-header' },
       h('div', null,
-        h('div', { className: 'main-title' }, 'ℹ️ Survey info'),
+        h('div', { className: 'main-title' }, '📊 Summary'),
         h('div', { className: 'main-subtitle' }, `${surveys.length} survey visit(s)`)
       )
     ),
     h('div', { className: 'content' },
-      h('div', { className: 'card', style: { marginBottom: 16 } },
-        h('div', { className: 'card-title' }, site.siteName || '(untitled site)'),
-        site.client && h('div', { className: 'card-sub', style: { marginTop: 2 } }, site.client)
+      h('div', { className: 'card', style: { marginBottom: 20 } },
+        infoRows.map(([k, v]) => h('div', {
+          key: k, style: { display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 13 },
+        }, h('div', { style: { fontWeight: 600, width: 190, color: 'var(--accent)', flexShrink: 0 } }, k), h('div', null, v)))
       ),
-      surveys.length === 0
-        ? h('div', { className: 'empty-state' }, h('div', { className: 'empty-title' }, 'No survey visits recorded'))
-        : surveys.map((sv) => h('div', { key: sv.id, className: 'card', style: { marginBottom: 12 } },
-            h('div', { className: 'card-title' }, sv.surveyDate || '(no date)'),
-            h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10, marginTop: 10, fontSize: 13 } },
-              h('div', null, h('div', { className: 'card-sub' }, 'Weather'), sv.weather || '—'),
-              h('div', null, h('div', { className: 'card-sub' }, 'Sunset'), sv.sunset || '—'),
-              h('div', null, h('div', { className: 'card-sub' }, 'Survey start'), sv.surveyStart || '—'),
-              h('div', null, h('div', { className: 'card-sub' }, 'Survey end'), sv.surveyEnd || '—'),
-              h('div', null, h('div', { className: 'card-sub' }, 'Cameras'), (sv.locations || []).length),
-              h('div', null, h('div', { className: 'card-sub' }, 'Sound detectors'), (sv.soundDetectors || []).length)
-            ),
-            h('div', { style: { marginTop: 10 } },
-              h('div', { className: 'card-sub', style: { marginBottom: 4 } }, 'Site personnel'),
-              (sv.personnel || []).length === 0
-                ? h('div', { style: { fontSize: 13 } }, '—')
-                : h('div', { style: { fontSize: 13 } },
-                    (sv.personnel || []).map((p) =>
-                      `${p.surveyorName || '(name unresolved - re-export from a newer version of SurveyReview)'}${p.role ? ' — ' + p.role : ''}`
-                    ).join(', '))
-            )
-          ))
+      h('div', { className: 'section-title' }, 'Personnel'),
+      summaryTable(personnelRowsFor(surveys), [{ key: 'Name', header: 'Name' }, { key: 'Role', header: 'Role' }]),
+      h('div', { className: 'section-title' }, 'Equipment'),
+      summaryTable(buildEquipmentListRows(surveys), [
+        { key: 'SurveyDate', header: 'Survey date' }, { key: 'Type', header: 'Type' }, { key: 'Name', header: 'Name' },
+        { key: 'EquipmentUnitId', header: 'Unit ID' }, { key: 'Kit', header: 'Kit' }, { key: 'Latitude', header: 'Latitude' }, { key: 'Longitude', header: 'Longitude' },
+      ]),
+      h('div', { className: 'section-title' }, 'Survey visits & conditions'),
+      summaryTable(buildSurveyVisitRows(surveys), [
+        { key: 'SurveyDate', header: 'Date' }, { key: 'Weather', header: 'Weather' }, { key: 'Sunset', header: 'Sunset' },
+        { key: 'SurveyStart', header: 'Start' }, { key: 'SurveyEnd', header: 'End' }, { key: 'EquipmentUsed', header: 'Equipment deployed' }, { key: 'SitePersonnel', header: 'Personnel' },
+      ]),
+      h('div', { className: 'section-title' }, 'Thermal camera results — summary'),
+      summaryTable(buildThermalSummaryRows(site, surveys), [
+        { key: 'SurveyDate', header: 'Date' }, { key: 'Location', header: 'Location' }, { key: 'ImagesReviewed', header: 'Images reviewed' },
+        { key: 'LabelBreakdown', header: 'Labelled frames' }, { key: 'SpeciesIdentified', header: 'Species identified' }, { key: 'RoostEmergenceRecorded', header: 'Roost emergence recorded' },
+      ]),
+      h('div', { className: 'section-title' }, 'Acoustic bat detector results — summary'),
+      summaryTable(buildAcousticSummaryRows(surveys), [
+        { key: 'SurveyDate', header: 'Date' }, { key: 'Detector', header: 'Detector' }, { key: 'Species', header: 'Species' },
+        { key: 'Passes', header: 'Passes' }, { key: 'PassesPerHour', header: 'Passes/hr' }, { key: 'Bouts', header: 'Bouts' }, { key: 'BoutsPerHour', header: 'Bouts/hr' },
+      ]),
+      h('div', { className: 'section-title' }, 'Survey constraints'),
+      summaryTable(buildConstraintRows(surveys), [
+        { key: 'SurveyDate', header: 'Date' }, { key: 'AffectedEquipment', header: 'Affected' }, { key: 'Description', header: 'Description' }, { key: 'Mitigation', header: 'Mitigation' },
+      ])
     )
   );
 }
@@ -912,20 +1062,33 @@ function App() {
   // output with preloaded project."
   const [site, setSite] = useState(() => (window.__PRELOADED_SITE__ ? M.migrateSite(window.__PRELOADED_SITE__) : null));
   const [mediaIndex, setMediaIndex] = useState(null);
-  const [tab, setTab] = useState('roost');
+  // Summary first - Clara, 2026-09-07: "order will be summary/survey info - roost register -
+  // observations - sound analysis."
+  const [tab, setTab] = useState('summary');
 
   if (!site) return h(LoadSiteScreen, { onLoaded: setSite });
   if (mediaIndex === null) return h(LinkMediaScreen, { onLinked: setMediaIndex, onSkip: () => setMediaIndex(new Map()) });
 
   const tabs = [
+    ['summary', '📊 Summary'],
     ['roost', '🦇 Roost register'],
     ['observations', '📷 Observations'],
     ['sound', '🔊 Sound analysis'],
-    ['info', 'ℹ️ Survey info'],
   ];
+  // Set by generateClientPortalHtml for an offline export only - the live hosted portal at
+  // portal.ecologyhive.co.uk never has this, and keeps EcologyHive's own styling. Applied as a
+  // plain CSS custom-property override (same variables index.html's own :root already defines),
+  // not a second stylesheet, so every existing component picks it up automatically via var(...)
+  // without needing its own branded/unbranded variant - Clara, 2026-09-07: "the one within the
+  // portal viewer keep it with same style as portal and ecologyhive - the exported offline viewer
+  // is the one that should be exported with Aerial Ecology's branding (this one will be a
+  // capability for all companies, define your branding for exports)."
+  const branding = window.__EXPORT_BRANDING__;
   return h('div', { className: 'app-shell' },
+    branding && h('style', null, `:root { --accent: ${branding.colors.accent}; --accent-dim: ${branding.colors.accentDim}; --teal: ${branding.colors.teal}; --teal-dim: ${branding.colors.tealDim}; }`),
     h('div', { className: 'sidebar' },
       h('div', { className: 'sidebar-header' },
+        branding && branding.logoDataUri && h('img', { src: branding.logoDataUri, alt: branding.companyName, style: { height: 28, marginBottom: 10, display: 'block' } }),
         h('div', { className: 'sidebar-app-name' }, site.siteName || '(untitled site)'),
         h('div', { className: 'sidebar-app-sub' }, site.client || 'Survey data viewer')
       ),
@@ -935,10 +1098,10 @@ function App() {
         }, label))
       )
     ),
+    tab === 'summary' && h(SummaryView, { site }),
     tab === 'roost' && h(RoostRegisterView, { site }),
     tab === 'observations' && h(ObservationsView, { site, mediaIndex }),
-    tab === 'sound' && h(SoundResultsView, { site, mediaIndex }),
-    tab === 'info' && h(SurveyInfoView, { site })
+    tab === 'sound' && h(SoundResultsView, { site, mediaIndex })
   );
 }
 
