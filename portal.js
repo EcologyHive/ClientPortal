@@ -909,11 +909,17 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
           hover && h(React.Fragment, null,
             h('div', { style: { position: 'absolute', left: hover.x, top: 0, height: SONO_HEIGHT, borderLeft: '1px dashed rgba(255,255,255,0.35)', pointerEvents: 'none' } }),
             h('div', { style: { position: 'absolute', left: 0, top: hover.y, width: SONO_WIDTH, borderTop: '1px dashed rgba(255,255,255,0.35)', pointerEvents: 'none' } }),
+            // Fixed colours, not theme variables - this tooltip sits on the sonogram canvas, which
+            // is always dark regardless of the page's own light/dark theme (spectrograms read best
+            // against black). var(--text) used to follow the PAGE theme though, so in light theme
+            // it became dark text on this already-dark background - unreadable. Clara, 2026-09-08:
+            // "in sonogram (analysis and everywhere) in clear theme - you cannot see the
+            // information (KHzs etc) when hovering... its colour conflicts with background."
             h('div', {
               style: {
                 position: 'absolute', left: Math.min(hover.x + 8, SONO_WIDTH - 110), top: Math.max(0, hover.y - 22),
-                background: 'rgba(10,12,14,0.9)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 6px',
-                fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text)', pointerEvents: 'none', whiteSpace: 'nowrap',
+                background: 'rgba(10,12,14,0.9)', border: '1px solid rgba(255,255,255,0.25)', borderRadius: 4, padding: '2px 6px',
+                fontSize: 11, fontFamily: 'var(--font-mono)', color: '#eef1f4', pointerEvents: 'none', whiteSpace: 'nowrap',
               },
             }, `${hover.freqKHz.toFixed(1)} kHz, ${hover.timeMs.toFixed(1)} ms`)
           )
