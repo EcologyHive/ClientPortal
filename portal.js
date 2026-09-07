@@ -821,9 +821,19 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
   const [error, setError] = useState(null);
   const [specInfo, setSpecInfo] = useState(null); // { durationSec, sampleRate } | null - drives the axes
   const [hover, setHover] = useState(null); // { x, y, freqKHz, timeMs } | null
+  // Bumped by the Reload button below to force a genuinely fresh read - Clara, 2026-09-08: "went
+  // back to sound and every screen was showing the same image with noise... i just re-linked the
+  // sound folder and it refreshed to the right one (funny this behaviour showed in portal also) -
+  // we need to fix that - force it to refresh a true sonogram." SurveyReview's own fix for this
+  // re-scans its whole sound folder fresh on every recording switch (it holds a live directory
+  // handle to do that with) - this popup only ever gets an already-resolved audioHandle from the
+  // portal's one-time media index, with no folder to re-scan from, so an explicit reload button is
+  // the available escape hatch here.
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     if (!audioHandle) { setStatus('missing'); return; }
+    setStatus('loading');
     (async () => {
       try {
         const file = await audioHandle.getFile();
@@ -849,7 +859,7 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [audioHandle]);
+  }, [audioHandle, reloadKey]);
 
   function pixelToFreq(y) { const nyquist = specInfo.sampleRate / 2; return Math.max(0, Math.min(nyquist, nyquist * (1 - y / SONO_HEIGHT))); }
   function pixelToTime(x) { return Math.max(0, (x / SONO_WIDTH) * specInfo.durationSec); }
@@ -914,7 +924,10 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
         )
       )
     ),
-    h('div', { className: 'modal-actions' }, h('button', { className: 'btn btn-secondary', onClick: onClose }, 'Close'))
+    h('div', { className: 'modal-actions' },
+      h('button', { className: 'btn btn-secondary', onClick: () => setReloadKey((k) => k + 1) }, '🔄 Reload'),
+      h('button', { className: 'btn btn-secondary', onClick: onClose }, 'Close')
+    )
   );
 }
 
