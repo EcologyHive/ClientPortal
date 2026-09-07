@@ -1,0 +1,14 @@
+{
+  "name": "clientportal-build",
+  "private": true,
+  "description": "Developer-only build tooling for the ClientPortal viewer (produces dist/hosted and dist/offline-template.html from viewer/). Not shipped - the shipped artifacts stay plain <script>-tag apps with no bundler/module loader, per this codebase's own convention.",
+  "scripts": {
+    "vendor": "node build/fetch-vendor.js",
+    "build": "node build/build.js",
+    "release": "node build/build.js && node build/release-to-root.js",
+    "sync-surveyreview": "node build/sync-to-surveyreview.js"
+  },
+  "devDependencies": {
+    "terser": "^5.31.0"
+  }
+}

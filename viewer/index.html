@@ -9,51 +9,13 @@ window.onerror = function(msg, src, line, col, err) {
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Survey Data Viewer</title>
-<link rel="stylesheet" href="vendor/leaflet.min.css" />
-<style>
-@font-face {
-  font-family: 'Inter';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url(vendor/fonts/inter-f11d729b.woff2) format('woff2');
-}
-@font-face {
-  font-family: 'Inter';
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url(vendor/fonts/inter-f11d729b.woff2) format('woff2');
-}
-@font-face {
-  font-family: 'Inter';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url(vendor/fonts/inter-f11d729b.woff2) format('woff2');
-}
-@font-face {
-  font-family: 'Montserrat';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url(vendor/fonts/montserrat-a5ec5492.woff2) format('woff2');
-}
-@font-face {
-  font-family: 'Montserrat';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url(vendor/fonts/montserrat-a5ec5492.woff2) format('woff2');
-}
-@font-face {
-  font-family: 'Montserrat';
-  font-style: normal;
-  font-weight: 800;
-  font-display: swap;
-  src: url(vendor/fonts/montserrat-a5ec5492.woff2) format('woff2');
-}
-</style>
+<!-- VENDOR:leaflet-css - build script replaces this with the pinned local/inlined copy; kept as a
+     CDN link here only so `viewer/` runs directly during development. -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<!-- VENDOR:fonts - build script replaces this with the pinned local/inlined WOFF2 copies. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root {
   /* Same EcologyHive brand tokens as every other app in this platform. */
@@ -146,9 +108,13 @@ html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-
 </head>
 <body>
 <div id="root"></div>
-<script src="vendor/react.production.min.js" crossorigin="anonymous"></script>
-<script src="vendor/react-dom.production.min.js" crossorigin="anonymous"></script>
-<script src="vendor/leaflet.min.js" crossorigin="anonymous"></script>
+<!-- VENDOR:react - build script replaces these three with the pinned local/inlined copies (same
+     versions for both the hosted build and the offline export - see the architecture plan §2: one
+     execution environment, not two). Kept as CDN links here only so `viewer/` runs directly during
+     development. -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous"></script>
 <!-- Deliberately trimmed, viewer-safe copies authored directly in this repo (see each file's own
      header comment and the architecture plan §1/§2) - NOT loaded live from review.ecologyhive.co.uk
      any more. Neither the hosted portal nor an offline export has any runtime dependency on
