@@ -869,31 +869,45 @@ function SonogramPopup({ recording, audioHandle, onClose }) {
   );
 }
 
+// Matches the internal SoundAnalysisResultsWorkspace's own layout exactly (segmented By species/By
+// location, one species-per-card table) - Clara, 2026-09-08: "please replicate our sound analysis
+// output (by survey date) looks better than the existing one." Previously this showed the species
+// summary AND every detector's full recording list stacked one after another, always - the segmented
+// control is what actually declutters it, showing one or the other rather than both at once. No Map
+// mode (SpeciesLocationMap is an internal-only component not yet ported) and no "Open →" per-species
+// row (there's nowhere to jump to in a read-only client viewer) - By location below already covers
+// getting to an actual recording/sonogram.
 function SoundResultsView({ site, mediaIndex }) {
   const surveys = site.surveys || [];
   const [surveyId, setSurveyId] = useState(surveys[0] ? surveys[0].id : null);
   const survey = surveys.find((s) => s.id === surveyId) || surveys[0];
   const stats = useMemo(() => survey ? computeSoundStats([survey]) : null, [survey]);
   const [sonogramFor, setSonogramFor] = useState(null); // recording | null
+  const [mode, setMode] = useState('species'); // 'species' | 'location'
 
   return h('div', { className: 'main' },
     h('div', { className: 'main-header' },
       h('div', null,
         h('div', { className: 'main-title' }, '🔊 Sound analysis results'),
         stats && h('div', { className: 'main-subtitle' },
-          `${stats.speciesList.length} species confirmed · ${stats.totalAnalysed}/${stats.totalRecordings} recording(s) analysed`)
+          `${stats.speciesList.length} species confirmed · ${stats.totalAnalysed}/${stats.totalRecordings} recording(s) analysed across ${stats.detectorCount} detector(s)`)
       ),
       surveys.length > 1 && h('select', { value: surveyId || '', onChange: (e) => setSurveyId(e.target.value) },
         surveys.map((s) => h('option', { key: s.id, value: s.id }, s.surveyDate || '(no date)')))
     ),
     h('div', { className: 'content' },
       !survey && h('div', { className: 'empty-state' }, h('div', { className: 'empty-title' }, 'No survey nights recorded')),
-      survey && stats.speciesList.length === 0 && h('div', { className: 'empty-state' },
+      survey && h('div', { className: 'segmented', style: { marginBottom: 16, maxWidth: 280 } },
+        h('button', { className: `segment ${mode === 'species' ? 'segment-active' : ''}`, onClick: () => setMode('species') }, 'By species'),
+        h('button', { className: `segment ${mode === 'location' ? 'segment-active' : ''}`, onClick: () => setMode('location') }, 'By location')
+      ),
+
+      survey && mode === 'species' && stats.speciesList.length === 0 && h('div', { className: 'empty-state' },
         h('div', { className: 'empty-title' }, 'No species confirmed yet')),
-      survey && stats.speciesList.map((s) => h('div', { key: s.species, className: 'card', style: { marginBottom: 12, padding: 14 } },
+      survey && mode === 'species' && stats.speciesList.map((s) => h('div', { key: s.species, className: 'card', style: { marginBottom: 12, padding: 14 } },
         h('div', { className: 'card-title' }, s.species),
         h('div', { className: 'card-sub', style: { marginTop: 4, marginBottom: 10 } },
-          `${s.totalPasses} pass(es), ${s.totalBouts} bout(s), across ${s.references.length} detector(s)`),
+          `${s.totalPasses} pass(es), ${s.totalBouts} bout(s) total, across ${s.references.length} detector(s)`),
         h('div', { style: { overflowX: 'auto' } },
           h('table', { style: { borderCollapse: 'collapse', fontSize: 12, width: '100%' } },
             h('thead', null, h('tr', null,
@@ -905,28 +919,28 @@ function SoundResultsView({ site, mediaIndex }) {
           )
         )
       )),
-      survey && stats.detectorEntries.length > 0 && h('div', null,
-        h('div', { className: 'section-title' }, 'By detector'),
-        stats.detectorEntries.map(({ detector }) => h('div', { key: detector.id },
-          h('div', { className: 'section-title', style: { fontSize: 13, margin: '12px 0 6px' } }, detector.name || '(unnamed detector)'),
-          h(SoundSummaryCard, { detector, progress: M.soundProgress(detector) }),
-          (detector.recordings || []).length > 0 && h('div', { style: { overflowX: 'auto', marginTop: -8, marginBottom: 16 } },
-            h('table', { style: { borderCollapse: 'collapse', fontSize: 12, width: '100%' } },
-              h('thead', null, h('tr', null,
-                h('th', { style: SUMMARY_TH_STYLE }, 'Time'), h('th', { style: SUMMARY_TH_STYLE }, 'File'),
-                h('th', { style: SUMMARY_TH_STYLE }, 'Species'), h('th', { style: SUMMARY_TH_STYLE }, '')
-              )),
-              h('tbody', null, (detector.recordings || []).map((rec) => h('tr', { key: rec.id },
-                h('td', { style: SUMMARY_TD_STYLE }, rec.dateTimeIso ? new Date(rec.dateTimeIso).toLocaleTimeString() : '—'),
-                h('td', { style: SUMMARY_TD_STYLE }, rec.fileName),
-                h('td', { style: SUMMARY_TD_STYLE }, recordingSpeciesLabel(rec.analysis) || '—'),
-                h('td', { style: SUMMARY_TD_STYLE },
-                  h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => setSonogramFor(rec) }, '🔬 Sonogram'))
-              )))
-            )
+
+      survey && mode === 'location' && stats.detectorEntries.length === 0 && h('div', { className: 'empty-state' },
+        h('div', { className: 'empty-title' }, 'No recordings imported yet')),
+      survey && mode === 'location' && stats.detectorEntries.map(({ detector }) => h('div', { key: detector.id, style: { marginBottom: 16 } },
+        h('div', { className: 'section-title', style: { fontSize: 13, margin: '0 0 6px' } }, detector.name || '(unnamed detector)'),
+        h(SoundSummaryCard, { detector, progress: M.soundProgress(detector) }),
+        (detector.recordings || []).length > 0 && h('div', { style: { overflowX: 'auto', marginTop: -8 } },
+          h('table', { style: { borderCollapse: 'collapse', fontSize: 12, width: '100%' } },
+            h('thead', null, h('tr', null,
+              h('th', { style: SUMMARY_TH_STYLE }, 'Time'), h('th', { style: SUMMARY_TH_STYLE }, 'File'),
+              h('th', { style: SUMMARY_TH_STYLE }, 'Species'), h('th', { style: SUMMARY_TH_STYLE }, '')
+            )),
+            h('tbody', null, (detector.recordings || []).map((rec) => h('tr', { key: rec.id },
+              h('td', { style: SUMMARY_TD_STYLE }, rec.dateTimeIso ? new Date(rec.dateTimeIso).toLocaleTimeString() : '—'),
+              h('td', { style: SUMMARY_TD_STYLE }, rec.fileName),
+              h('td', { style: SUMMARY_TD_STYLE }, recordingSpeciesLabel(rec.analysis) || '—'),
+              h('td', { style: SUMMARY_TD_STYLE },
+                h('button', { className: 'btn btn-secondary btn-tiny', onClick: () => setSonogramFor(rec) }, '🔬 Sonogram'))
+            )))
           )
-        ))
-      )
+        )
+      ))
     ),
     sonogramFor && h(SonogramPopup, {
       recording: sonogramFor,
@@ -1006,24 +1020,6 @@ function buildConstraintRows(surveys) {
   return rows;
 }
 
-function buildAcousticSummaryRows(surveys) {
-  const rows = [];
-  (surveys || []).forEach((survey) => {
-    (survey.soundDetectors || []).forEach((det) => {
-      const summary = M.soundSummary(det);
-      if (summary.speciesList.length === 0) return;
-      summary.speciesList.forEach((s) => {
-        rows.push({
-          SurveyDate: survey.surveyDate || '', Detector: det.name || '', Species: s.species,
-          Passes: s.passCount, PassesPerHour: summary.spanHours ? (s.passCount / summary.spanHours).toFixed(2) : '',
-          Bouts: s.boutCount, BoutsPerHour: summary.spanHours ? (s.boutCount / summary.spanHours).toFixed(2) : '',
-        });
-      });
-    });
-  });
-  return rows;
-}
-
 // One row per Location - "how much thermal coverage, what did it show" - aggregated up from every
 // image the same way SurveyReview's own equivalent builder does (see its own comment there).
 function buildThermalSummaryRows(site, surveys) {
@@ -1080,6 +1076,14 @@ function SummaryView({ site }) {
   const dateRange = dates.length === 0 ? '—' : dates.length === 1 ? dates[0] : `${dates[0]} to ${dates[dates.length - 1]} (${dates.length} visits)`;
   const locationCount = surveys.reduce((n, s) => n + (s.locations || []).length, 0);
   const detectorCount = surveys.reduce((n, s) => n + (s.soundDetectors || []).length, 0);
+  const roostStats = useMemo(() => computeRoostStats(site), [site]);
+  const roostRows = (site.roostEntrances || []).map((r) => {
+    const s = roostStats[r.id] || { peakCount: 0, peakSurveyDate: null, species: new Set() };
+    return {
+      Ref: r.code, Count: s.peakCount, Date: s.peakSurveyDate || '—',
+      Species: s.species.size > 0 ? Array.from(s.species).join(', ') : 'None confirmed',
+    };
+  });
 
   const infoRows = [
     ['Site', site.siteName || '(untitled site)'],
@@ -1111,21 +1115,41 @@ function SummaryView({ site }) {
         { key: 'SurveyDate', header: 'Survey date' }, { key: 'Type', header: 'Type' }, { key: 'Name', header: 'Name' },
         { key: 'EquipmentUnitId', header: 'Unit ID' }, { key: 'Kit', header: 'Kit' }, { key: 'Latitude', header: 'Latitude' }, { key: 'Longitude', header: 'Longitude' },
       ]),
+      // A wide table crammed Weather/Sunset/Start/End/Equipment/Personnel into one horizontally-
+      // scrolling row per visit - Clara, 2026-09-08: "i do not like how you have deployed weather
+      // sunset etc in only line, can you split it in boxes so it looks like a nice and tidy table."
+      // One card per visit instead, each field its own labelled box - same convention the old
+      // Survey info tab used for Weather/Sunset/etc before this page absorbed it.
       h('div', { className: 'section-title' }, 'Survey visits & conditions'),
-      summaryTable(buildSurveyVisitRows(surveys), [
-        { key: 'SurveyDate', header: 'Date' }, { key: 'Weather', header: 'Weather' }, { key: 'Sunset', header: 'Sunset' },
-        { key: 'SurveyStart', header: 'Start' }, { key: 'SurveyEnd', header: 'End' }, { key: 'EquipmentUsed', header: 'Equipment deployed' }, { key: 'SitePersonnel', header: 'Personnel' },
+      surveys.length === 0 ? h('div', { className: 'card-sub' }, 'Nothing recorded.') : surveys.map((survey) => {
+        const row = buildSurveyVisitRows([survey])[0];
+        return h('div', { key: survey.id, className: 'card', style: { marginBottom: 12 } },
+          h('div', { className: 'card-title' }, row.SurveyDate || '(no date)'),
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginTop: 10, fontSize: 13 } },
+            h('div', null, h('div', { className: 'card-sub' }, 'Weather'), row.Weather || '—'),
+            h('div', null, h('div', { className: 'card-sub' }, 'Sunset'), row.Sunset || '—'),
+            h('div', null, h('div', { className: 'card-sub' }, 'Start'), row.SurveyStart || '—'),
+            h('div', null, h('div', { className: 'card-sub' }, 'End'), row.SurveyEnd || '—')
+          ),
+          h('div', { style: { marginTop: 10 } }, h('div', { className: 'card-sub', style: { marginBottom: 4 } }, 'Equipment deployed'), h('div', { style: { fontSize: 13 } }, row.EquipmentUsed || '—')),
+          h('div', { style: { marginTop: 8 } }, h('div', { className: 'card-sub', style: { marginBottom: 4 } }, 'Personnel'), h('div', { style: { fontSize: 13 } }, row.SitePersonnel || '—'))
+        );
+      }),
+
+      h('div', { className: 'section-title' }, 'Roost register summary'),
+      summaryTable(roostRows, [
+        { key: 'Ref', header: 'Roost ref' }, { key: 'Count', header: 'Count' }, { key: 'Date', header: 'Date' }, { key: 'Species', header: 'Species' },
       ]),
+
       h('div', { className: 'section-title' }, 'Thermal camera results — summary'),
       summaryTable(buildThermalSummaryRows(site, surveys), [
         { key: 'SurveyDate', header: 'Date' }, { key: 'Location', header: 'Location' }, { key: 'ImagesReviewed', header: 'Images reviewed' },
         { key: 'LabelBreakdown', header: 'Labelled frames' }, { key: 'SpeciesIdentified', header: 'Species identified' }, { key: 'RoostEmergenceRecorded', header: 'Roost emergence recorded' },
       ]),
-      h('div', { className: 'section-title' }, 'Acoustic bat detector results — summary'),
-      summaryTable(buildAcousticSummaryRows(surveys), [
-        { key: 'SurveyDate', header: 'Date' }, { key: 'Detector', header: 'Detector' }, { key: 'Species', header: 'Species' },
-        { key: 'Passes', header: 'Passes' }, { key: 'PassesPerHour', header: 'Passes/hr' }, { key: 'Bouts', header: 'Bouts' }, { key: 'BoutsPerHour', header: 'Bouts/hr' },
-      ]),
+      // Acoustic bat detector summary removed here - Clara, 2026-09-08: "Acoustic detector summary
+      // - remove from summary - too cluttered in the current format." The Sound analysis tab's own
+      // "By species" view (just replicated from the internal tool's own layout) already covers this
+      // properly.
       h('div', { className: 'section-title' }, 'Survey constraints'),
       summaryTable(buildConstraintRows(surveys), [
         { key: 'SurveyDate', header: 'Date' }, { key: 'AffectedEquipment', header: 'Affected' }, { key: 'Description', header: 'Description' }, { key: 'Mitigation', header: 'Mitigation' },
