@@ -154,8 +154,8 @@ async function main() {
      versions for both the hosted build and the offline export - see the architecture plan §2: one
      execution environment, not two). Kept as CDN links here only so \`viewer/\` runs directly during
      development. -->
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous"></script>`,
     `<script src="vendor/react.production.min.js" crossorigin="anonymous"></script>
 <script src="vendor/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -200,8 +200,8 @@ async function main() {
      versions for both the hosted build and the offline export - see the architecture plan §2: one
      execution environment, not two). Kept as CDN links here only so \`viewer/\` runs directly during
      development. -->
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous"></script>`,
     `<script>\n${reactJs}\n</script>\n<script>\n${reactDomJs}\n</script>\n<script>\n${leafletJs}\n</script>`,
     'react-vendor'
